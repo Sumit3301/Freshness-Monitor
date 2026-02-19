@@ -102,24 +102,12 @@ def classify_image(image_path: str) -> dict:
         }
 
 
-def generate_qr_code(data: dict) -> bytes:
-    """Generate a QR code containing freshness stage information."""
-    qr_data = {
-        "product": "freshness_classification",
-        "stage": data.get("stage", -1),
-        "stage_name": data.get("stage_name", "unknown"),
-        "confidence": round(data.get("confidence", 0), 4),
-        "dominant_colors": data.get("hex_colors", {}),
-        "timestamp": data.get("timestamp", ""),
-        "filename": data.get("filename", ""),
-    }
-
+def generate_qr_code(url: str, stage_color: str) -> bytes:
+    """Generate a QR code containing the result page URL."""
     qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=4)
-    qr.add_data(json.dumps(qr_data, separators=(',', ':')))
+    qr.add_data(url)
     qr.make(fit=True)
 
-    # Color the QR code based on stage
-    stage_color = data.get("stage_color", "#333333")
     # Convert hex to RGB tuple
     r = int(stage_color[1:3], 16)
     g = int(stage_color[3:5], 16)
@@ -128,7 +116,6 @@ def generate_qr_code(data: dict) -> bytes:
     img = qr.make_image(fill_color=(r, g, b), back_color="white")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    buf.seek(0)
     return buf.getvalue()
 
 
@@ -174,14 +161,33 @@ def watch_incoming_folder():
                     with open(result_path, "w") as f:
                         json.dump(result, f, indent=2)
 
-                    # Auto-generate barcode
+                    # Auto-generate barcode & result page (Latest Only)
+                    base_url = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{config.SERVER_PORT}")
+                    latest_url = f"{base_url.rstrip('/')}/result/latest"
+
+                    # Read image as base64 for result page
+                    with open(filepath, "rb") as img_f:
+                        image_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+
+                    result["barcode_url"] = "/barcode/image/latest"
+                    result["result_url"] = "/result/latest"
+
+                    # Store ONLY the latest result in memory
+                    result_store.clear()
+                    result_store["latest"] = {
+                        **result,
+                        "image_base64": image_b64
+                    }
+
+                    # Generate & Save QR png for latest
+                    qr_bytes = generate_qr_code(latest_url, result.get("stage_color", "#333333"))
                     barcode_dir = config.BARCODE_DIR
                     os.makedirs(barcode_dir, exist_ok=True)
-                    qr_bytes = generate_qr_code(result)
-                    barcode_path = os.path.join(barcode_dir, f"{os.path.splitext(filename)[0]}_qr.png")
+                    # We overwrite 'latest_qr.png' so the endpoint always serves it
+                    barcode_path = os.path.join(barcode_dir, "latest_qr.png")
                     with open(barcode_path, "wb") as f:
                         f.write(qr_bytes)
-                    print(f"   QR barcode saved: {barcode_path}")
+                    print(f"   QR barcode updated: {barcode_path}")
                 else:
                     print(f"   Error: {result['error']}")
 
@@ -265,39 +271,46 @@ def barcode():
     if "error" in result:
         return jsonify(result), 500
 
-    # Generate QR barcode
-    qr_bytes = generate_qr_code(result)
-    barcode_id = str(uuid.uuid4())[:8]
+    # Generate QR for 'latest' URL
+    base_url = request.host_url.rstrip('/')
+    latest_url = f"{base_url}/result/latest"
 
-    # Save barcode
+    # Generate QR barcode pointing to /result/latest
+    qr_bytes = generate_qr_code(latest_url, result.get("stage_color", "#333333"))
+
+    # Save as 'latest_qr.png'
     os.makedirs(config.BARCODE_DIR, exist_ok=True)
-    barcode_path = os.path.join(config.BARCODE_DIR, f"{barcode_id}.png")
+    barcode_path = os.path.join(config.BARCODE_DIR, "latest_qr.png")
     with open(barcode_path, "wb") as f:
         f.write(qr_bytes)
 
     # Build response
-    result["barcode_id"] = barcode_id
-    result["barcode_url"] = f"/barcode/image/{barcode_id}"
+    result["barcode_url"] = "/barcode/image/latest"
     result["barcode_base64"] = base64.b64encode(qr_bytes).decode("utf-8")
-    result["result_url"] = f"/result/{barcode_id}"
+    result["result_url"] = "/result/latest"
 
-    # Store for result page
-    result_store[barcode_id] = {
+    # Store ONLY the latest result
+    result_store.clear()
+    result_store["latest"] = {
         **result,
-        "image_base64": image_b64,
+        "image_base64": image_b64
     }
-    # Cap stored results to 50
-    if len(result_store) > 50:
-        oldest = next(iter(result_store))
-        del result_store[oldest]
 
     return jsonify(result)
 
 
+
+
 @app.route("/barcode/image/<barcode_id>", methods=["GET"])
 def get_barcode(barcode_id):
-    """Retrieve a generated barcode image by ID."""
-    barcode_path = os.path.join(config.BARCODE_DIR, f"{barcode_id}.png")
+    """Retrieve the generated barcode image (usually 'latest')."""
+    # Map 'latest' to the actual file
+    if barcode_id == "latest":
+        filename = "latest_qr.png"
+    else:
+        filename = f"{barcode_id}.png"
+        
+    barcode_path = os.path.join(config.BARCODE_DIR, filename)
     if not os.path.exists(barcode_path):
         return jsonify({"error": "Barcode not found"}), 404
     return send_file(barcode_path, mimetype="image/png")
@@ -305,10 +318,20 @@ def get_barcode(barcode_id):
 
 @app.route("/result/<result_id>", methods=["GET"])
 def show_result(result_id):
-    """Interactive result page showing image + classification."""
-    data = result_store.get(result_id)
+    """Interactive result page showing the LATEST image + classification."""
+    # Always serve 'latest' if requested, or look it up (though we only store latest now)
+    target_id = "latest" if result_id == "latest" else result_id
+    
+    data = result_store.get(target_id)
     if not data:
-        return "<h2>Result not found or expired</h2><p><a href='/dashboard'>Go to dashboard</a></p>", 404
+        # Fallback: if user requests specific ID but we only have latest, show latest?
+        # Or distinct error? User wants "show the last image".
+        # If 'latest' exists, we can show it with a note?
+        # For now, let's just try to get 'latest' if nothing else found.
+        data = result_store.get("latest")
+        if not data:
+             return "<h2>No result data available (waiting for upload...)</h2><p><a href='/dashboard'>Go to dashboard</a></p>", 404
+
     return RESULT_HTML.replace("{{DATA_JSON}}", json.dumps(data))
 
 
@@ -638,7 +661,12 @@ window.addEventListener("unload", function() {
 @app.route("/status", methods=["GET"])
 def status():
     """Server health check."""
+    from flask import request
+    base_url = request.host_url.rstrip('/')
+    
     uptime = (datetime.now() - server_start_time).total_seconds() if server_start_time else 0
+    latest = result_store.get("latest")
+    
     return jsonify({
         "status": "running",
         "model_loaded": model is not None,
@@ -646,6 +674,8 @@ def status():
         "total_predictions": len(prediction_history),
         "last_prediction": prediction_history[0] if prediction_history else None,
         "watching_folder": config.INCOMING_DIR,
+        "latest_qr_url": "/barcode/image/latest" if latest else None,
+        "result_page_url": f"{base_url}/result/latest" if latest else None,
         "stages": config.LABEL_NAMES,
         "stage_colors": config.STAGE_COLORS,
     })
@@ -843,6 +873,12 @@ DASHBOARD_HTML = """
                 <div class="label">Last Stage</div>
                 <div class="value" id="lastResult">-</div>
             </div>
+             <div class="status-card" id="liveQrCard" style="display:none; text-align:center;">
+                <div class="label">Live Result</div>
+                <a href="/result/latest" target="_blank" id="liveQrLink">
+                    <img id="liveQrImg" src="" style="width:60px; height:60px; border-radius:4px; margin-top:4px;">
+                </a>
+            </div>
         </div>
 
         <div class="upload-section" id="uploadSection">
@@ -978,6 +1014,13 @@ DASHBOARD_HTML = """
                     document.querySelectorAll('.stage-segment').forEach((s, i) => {
                         s.classList.toggle('active', i === data.last_prediction.stage);
                     });
+                }
+                
+                // Live QR
+                if (data.latest_qr_url) {
+                    document.getElementById('liveQrCard').style.display = 'block';
+                    document.getElementById('liveQrImg').src = data.latest_qr_url + '?t=' + new Date().getTime(); // burst cache
+                    document.getElementById('liveQrLink').href = data.result_page_url;
                 }
             } catch (err) { /* ignore */ }
         }

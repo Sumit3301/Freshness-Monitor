@@ -170,6 +170,8 @@ def transfer_http(filepath: str) -> dict:
                 logger.info(f"  >> Colors: {result['hex_colors']}")
             if barcode_id:
                 logger.info(f"  >> QR: {RENDER_URL}/barcode/image/{barcode_id}")
+                if result.get("result_url"):
+                     logger.info(f"  >> Page: {RENDER_URL}{result['result_url']}")
         else:
             logger.error(f"Server error {response.status_code}: {response.text}")
     except requests.exceptions.ConnectionError:
