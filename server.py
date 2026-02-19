@@ -312,6 +312,15 @@ def show_result(result_id):
     return RESULT_HTML.replace("{{DATA_JSON}}", json.dumps(data))
 
 
+@app.route("/result/cleanup/<result_id>", methods=["POST"])
+def cleanup_result(result_id):
+    """Remove result data from memory when the page is closed."""
+    if result_id in result_store:
+        del result_store[result_id]
+        return "ok", 200
+    return "not found", 404
+
+
 RESULT_HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
@@ -615,6 +624,11 @@ if (D.barcode_base64) {
     document.getElementById('qrImg').src = 'data:image/png;base64,' + D.barcode_base64;
 }
 document.getElementById('barcodeId').textContent = 'ID: ' + D.barcode_id;
+
+// Cleanup on close
+window.addEventListener("unload", function() {
+    navigator.sendBeacon("/result/cleanup/" + D.barcode_id);
+});
 </script>
 </body>
 </html>
