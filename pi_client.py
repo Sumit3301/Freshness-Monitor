@@ -27,16 +27,22 @@ from datetime import datetime
 from pathlib import Path
 
 # ─── Configuration (update these for your setup) ───────────────────
-SERVER_IP      = "100.108.137.17"      # <- Your local PC's LAN IP
+# Cloud server (Render) — prediction + dashboard
+RENDER_URL     = "https://freshness-monitor.onrender.com"  # ← Your Render URL
+HTTP_PREDICT   = f"{RENDER_URL}/predict"
+HTTP_BARCODE   = f"{RENDER_URL}/barcode"
+
+# Local PC server — file storage only
+LOCAL_SERVER_IP   = "100.108.137.17"      # ← Your PC's Tailscale IP
+LOCAL_SERVER_PORT = 5001                  # file_server.py port
+LOCAL_UPLOAD_URL  = f"http://{LOCAL_SERVER_IP}:{LOCAL_SERVER_PORT}/upload"
+
 SERVER_USER    = "Acer"               # ← Your Windows username
-SERVER_PORT    = 5000                 # Flask server port
 SCP_DEST_DIR   = r"d:\\POC project\\incoming"  # Destination on your PC
 CAPTURE_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "captures")
 CAPTURE_INTERVAL = 10                 # Seconds between captures
 IMAGE_WIDTH    = 1920
 IMAGE_HEIGHT   = 1080
-HTTP_PREDICT   = f"http://{SERVER_IP}:{SERVER_PORT}/predict"
-HTTP_BARCODE   = f"http://{SERVER_IP}:{SERVER_PORT}/barcode"
 
 # ─── Logging Setup ──────────────────────────────────────────────────
 Path(CAPTURE_DIR).mkdir(parents=True, exist_ok=True)
@@ -136,14 +142,17 @@ def transfer_scp(filepath: str) -> bool:
 
 def transfer_http(filepath: str) -> dict:
     """
-    Transfer an image via HTTP POST and get real-time stage classification.
-    Uses the /barcode endpoint for stage detection + QR code generation.
+    Transfer an image via HTTP POST:
+      1. Send to Render cloud for prediction + dashboard
+      2. Send to local PC for file storage
     """
     import requests
 
     filename = os.path.basename(filepath)
-    logger.info(f"Sending: {filename} -> {HTTP_BARCODE}")
 
+    # ── 1. Send to Render for prediction ──
+    logger.info(f"Sending: {filename} -> {HTTP_BARCODE}")
+    result = None
     try:
         with open(filepath, "rb") as f:
             response = requests.post(
@@ -155,25 +164,35 @@ def transfer_http(filepath: str) -> dict:
             result = response.json()
             stage = result.get("stage_name", "unknown")
             confidence = result.get("confidence", 0)
-            stage_color = result.get("stage_color", "")
             barcode_id = result.get("barcode_id", "")
             logger.info(f"  >> {stage} (confidence: {confidence:.1%})")
             if result.get("hex_colors"):
-                colors = result["hex_colors"]
-                logger.info(f"  >> Colors: {colors}")
+                logger.info(f"  >> Colors: {result['hex_colors']}")
             if barcode_id:
-                logger.info(f"  >> QR barcode: http://{SERVER_IP}:{SERVER_PORT}/barcode/image/{barcode_id}")
-            return result
+                logger.info(f"  >> QR: {RENDER_URL}/barcode/image/{barcode_id}")
         else:
             logger.error(f"Server error {response.status_code}: {response.text}")
-            return None
     except requests.exceptions.ConnectionError:
-        logger.error(f"Cannot connect to server at {HTTP_BARCODE}")
-        logger.error(f"Make sure server.py is running on {SERVER_IP}")
-        return None
+        logger.error(f"Cannot connect to Render at {HTTP_BARCODE}")
     except Exception as e:
-        logger.error(f"HTTP transfer failed: {e}")
-        return None
+        logger.error(f"Render transfer failed: {e}")
+
+    # ── 2. Send to local PC for storage ──
+    try:
+        with open(filepath, "rb") as f:
+            resp = requests.post(
+                LOCAL_UPLOAD_URL,
+                files={"image": (filename, f, "image/jpeg")},
+                timeout=10,
+            )
+        if resp.status_code == 200:
+            logger.info(f"  📁 Saved to PC: {filename}")
+        else:
+            logger.warning(f"  PC storage error: {resp.status_code}")
+    except Exception:
+        logger.warning(f"  PC storage offline, skipping local save")
+
+    return result
 
 
 def transfer_paramiko(filepath: str) -> bool:
@@ -218,7 +237,8 @@ def run_continuous_capture(mode: str, camera_method: str):
     logger.info("Freshness Monitor - Raspberry Pi Client")
     logger.info(f"   Mode     : {mode}")
     logger.info(f"   Camera   : {camera_method}")
-    logger.info(f"   Server   : {SERVER_IP}:{SERVER_PORT}")
+    logger.info(f"   Render   : {RENDER_URL}")
+    logger.info(f"   Local PC : {LOCAL_UPLOAD_URL}")
     logger.info(f"   Interval : {CAPTURE_INTERVAL}s")
     logger.info("=" * 50)
 
