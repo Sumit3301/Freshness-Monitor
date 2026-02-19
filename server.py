@@ -47,6 +47,7 @@ app = Flask(__name__)
 model = None
 scaler = None
 prediction_history = deque(maxlen=100)
+result_store = {}          # barcode_id -> {result + image_base64}
 server_start_time = None
 
 
@@ -248,6 +249,10 @@ def barcode():
     temp_path = os.path.join(temp_dir, file.filename)
     file.save(temp_path)
 
+    # Read image as base64 for result page
+    with open(temp_path, "rb") as img_f:
+        image_b64 = base64.b64encode(img_f.read()).decode("utf-8")
+
     result = classify_image(temp_path)
 
     # Keep the image in incoming/ for records
@@ -274,6 +279,17 @@ def barcode():
     result["barcode_id"] = barcode_id
     result["barcode_url"] = f"/barcode/image/{barcode_id}"
     result["barcode_base64"] = base64.b64encode(qr_bytes).decode("utf-8")
+    result["result_url"] = f"/result/{barcode_id}"
+
+    # Store for result page
+    result_store[barcode_id] = {
+        **result,
+        "image_base64": image_b64,
+    }
+    # Cap stored results to 50
+    if len(result_store) > 50:
+        oldest = next(iter(result_store))
+        del result_store[oldest]
 
     return jsonify(result)
 
@@ -285,6 +301,324 @@ def get_barcode(barcode_id):
     if not os.path.exists(barcode_path):
         return jsonify({"error": "Barcode not found"}), 404
     return send_file(barcode_path, mimetype="image/png")
+
+
+@app.route("/result/<result_id>", methods=["GET"])
+def show_result(result_id):
+    """Interactive result page showing image + classification."""
+    data = result_store.get(result_id)
+    if not data:
+        return "<h2>Result not found or expired</h2><p><a href='/dashboard'>Go to dashboard</a></p>", 404
+    return RESULT_HTML.replace("{{DATA_JSON}}", json.dumps(data))
+
+
+RESULT_HTML = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Classification Result</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0a0e1a;
+            color: #e0e6f0;
+            min-height: 100vh;
+        }
+        .page {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            padding: 24px 0 16px;
+        }
+        .header h1 {
+            font-size: 1.6rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .header .ts {
+            font-size: 0.85rem;
+            color: #6b7280;
+            margin-top: 6px;
+        }
+
+        /* Layout */
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 16px;
+        }
+        @media (max-width: 700px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+
+        /* Card */
+        .card {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 16px;
+            padding: 20px;
+            backdrop-filter: blur(12px);
+        }
+        .card-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #6b7280;
+            margin-bottom: 14px;
+        }
+
+        /* Image */
+        .img-card { grid-column: 1; }
+        .img-card img {
+            width: 100%;
+            border-radius: 12px;
+            object-fit: cover;
+        }
+
+        /* Stage badge */
+        .stage-card { grid-column: 2; }
+        @media (max-width: 700px) { .stage-card { grid-column: 1; } }
+        .stage-badge {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 16px;
+            border-radius: 14px;
+            background: rgba(255,255,255,0.05);
+            margin-bottom: 18px;
+        }
+        .stage-dot {
+            width: 48px; height: 48px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%,100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.3); }
+            50%     { box-shadow: 0 0 18px 4px rgba(255,255,255,0.15); }
+        }
+        .stage-label { font-size: 1.3rem; font-weight: 600; }
+        .stage-sub { font-size: 0.85rem; color: #9ca3af; }
+
+        /* Confidence gauge */
+        .gauge-wrap {
+            margin: 18px 0;
+            text-align: center;
+        }
+        .gauge-bar {
+            height: 10px;
+            border-radius: 5px;
+            background: rgba(255,255,255,0.08);
+            overflow: hidden;
+        }
+        .gauge-fill {
+            height: 100%;
+            border-radius: 5px;
+            transition: width 1.2s ease;
+        }
+        .gauge-pct {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-top: 8px;
+        }
+
+        /* Stage probabilities */
+        .prob-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .prob-label {
+            width: 130px;
+            font-size: 0.8rem;
+            color: #9ca3af;
+            text-align: right;
+            flex-shrink: 0;
+        }
+        .prob-bar {
+            flex: 1;
+            height: 8px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.06);
+            overflow: hidden;
+        }
+        .prob-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 1s ease;
+        }
+        .prob-val {
+            width: 50px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        /* Colors */
+        .color-row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .swatch {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+        }
+        .swatch-circle {
+            width: 46px; height: 46px;
+            border-radius: 50%;
+            border: 2px solid rgba(255,255,255,0.15);
+        }
+        .swatch-hex {
+            font-size: 0.72rem;
+            color: #9ca3af;
+            font-family: monospace;
+        }
+
+        /* QR */
+        .qr-wrap {
+            text-align: center;
+        }
+        .qr-wrap img {
+            width: 140px;
+            border-radius: 10px;
+            background: #fff;
+            padding: 8px;
+        }
+
+        /* Bottom bar */
+        .full-span { grid-column: 1 / -1; }
+        .back-link {
+            display: block;
+            text-align: center;
+            margin-top: 20px;
+            color: #60a5fa;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+<div class="page">
+    <div class="header">
+        <h1>Freshness Classification Result</h1>
+        <div class="ts" id="timestamp"></div>
+    </div>
+
+    <div class="grid">
+        <!-- Image -->
+        <div class="card img-card">
+            <div class="card-title">Uploaded Image</div>
+            <img id="srcImg" alt="source image">
+        </div>
+
+        <!-- Stage + Confidence -->
+        <div class="card stage-card">
+            <div class="card-title">Classification</div>
+            <div class="stage-badge">
+                <div class="stage-dot" id="dot"></div>
+                <div>
+                    <div class="stage-label" id="stageName"></div>
+                    <div class="stage-sub" id="filename"></div>
+                </div>
+            </div>
+
+            <div class="gauge-wrap">
+                <div class="card-title">Confidence</div>
+                <div class="gauge-bar"><div class="gauge-fill" id="gaugeFill"></div></div>
+                <div class="gauge-pct" id="gaugePct"></div>
+            </div>
+        </div>
+
+        <!-- Stage probabilities -->
+        <div class="card full-span">
+            <div class="card-title">Stage Probabilities</div>
+            <div id="probs"></div>
+        </div>
+
+        <!-- Dominant colors -->
+        <div class="card">
+            <div class="card-title">Dominant Film Colors</div>
+            <div class="color-row" id="colors"></div>
+        </div>
+
+        <!-- QR -->
+        <div class="card">
+            <div class="card-title">QR Barcode</div>
+            <div class="qr-wrap">
+                <img id="qrImg" alt="QR code">
+                <div class="stage-sub" style="margin-top:8px" id="barcodeId"></div>
+            </div>
+        </div>
+    </div>
+
+    <a class="back-link" href="/dashboard">&larr; Back to Dashboard</a>
+</div>
+
+<script>
+const STAGE_COLORS = ['#2ecc71', '#f1c40f', '#e67e22', '#e74c3c'];
+const D = {{DATA_JSON}};
+
+// Image
+document.getElementById('srcImg').src = 'data:image/jpeg;base64,' + D.image_base64;
+
+// Stage
+document.getElementById('stageName').textContent = D.stage_name;
+document.getElementById('filename').textContent = D.filename;
+document.getElementById('dot').style.background = D.stage_color;
+document.getElementById('timestamp').textContent = new Date(D.timestamp).toLocaleString();
+
+// Confidence gauge
+const pct = (D.confidence * 100).toFixed(1);
+document.getElementById('gaugePct').textContent = pct + '%';
+const fill = document.getElementById('gaugeFill');
+fill.style.background = D.stage_color;
+setTimeout(() => fill.style.width = pct + '%', 100);
+
+// Probabilities
+const probsEl = document.getElementById('probs');
+Object.entries(D.stage_probabilities).forEach(([name, prob], i) => {
+    const row = document.createElement('div');
+    row.className = 'prob-row';
+    const p = (prob * 100).toFixed(1);
+    row.innerHTML = `
+        <div class="prob-label">${name}</div>
+        <div class="prob-bar"><div class="prob-fill" style="width:0;background:${STAGE_COLORS[i]}"></div></div>
+        <div class="prob-val" style="color:${STAGE_COLORS[i]}">${p}%</div>
+    `;
+    probsEl.appendChild(row);
+    setTimeout(() => row.querySelector('.prob-fill').style.width = p + '%', 150 + i * 120);
+});
+
+// Colors
+const colorsEl = document.getElementById('colors');
+Object.entries(D.hex_colors).forEach(([k, hex]) => {
+    const s = document.createElement('div');
+    s.className = 'swatch';
+    s.innerHTML = `<div class="swatch-circle" style="background:${hex}"></div><div class="swatch-hex">${hex}</div>`;
+    colorsEl.appendChild(s);
+});
+
+// QR
+if (D.barcode_base64) {
+    document.getElementById('qrImg').src = 'data:image/png;base64,' + D.barcode_base64;
+}
+document.getElementById('barcodeId').textContent = 'ID: ' + D.barcode_id;
+</script>
+</body>
+</html>
+"""
 
 
 @app.route("/status", methods=["GET"])
