@@ -1,0 +1,18 @@
+# Images & data (too large for git)
+augmented/
+incoming/
+temp/
+results/
+barcodes/
+features.csv
+ppr1shrimp.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
