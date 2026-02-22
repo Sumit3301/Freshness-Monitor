@@ -740,10 +740,16 @@ def _generate_mjpeg():
 def video_feed():
     """MJPEG stream of RPi camera frames (pushed via POST /frame)."""
     from flask import Response
-    return Response(
+    response = Response(
         _generate_mjpeg(),
         mimetype="multipart/x-mixed-replace; boundary=frame"
     )
+    # Critical for Render (nginx reverse proxy): disable response buffering so
+    # frames are forwarded to the browser in real-time instead of being queued.
+    response.headers["X-Accel-Buffering"] = "no"
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 # ─── Stream Page HTML ─────────────────────────────────────────────────
