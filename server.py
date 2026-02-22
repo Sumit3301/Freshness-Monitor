@@ -1022,6 +1022,44 @@ def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
 
+@app.route("/gallery", methods=["GET"])
+def gallery_page():
+    """Historical image gallery UI."""
+    return render_template_string(GALLERY_HTML)
+
+
+@app.route("/image/<filename>", methods=["GET"])
+def serve_image(filename):
+    """Serve a raw image from the incoming directory."""
+    try:
+        # Prevent directory traversal
+        safe_name = os.path.basename(filename)
+        return send_file(os.path.join(config.INCOMING_DIR, safe_name))
+    except Exception as e:
+        return jsonify({"error": "Image not found"}), 404
+
+
+@app.route("/api/gallery", methods=["GET"])
+def api_gallery():
+    """Return JSON list of up to to 50 recent classification results from disk."""
+    limit = request.args.get("limit", 50, type=int)
+    results = []
+    
+    try:
+        # Get all json files in results dir, sorted by modified time (newest first)
+        files = [f for f in os.listdir(config.RESULTS_DIR) if f.endswith(".json")]
+        files.sort(key=lambda x: os.path.getmtime(os.path.join(config.RESULTS_DIR, x)), reverse=True)
+        
+        for filename in files[:limit]:
+            with open(os.path.join(config.RESULTS_DIR, filename), "r") as f:
+                data = json.load(f)
+                results.append(data)
+    except Exception as e:
+        print(f"Error loading gallery API: {e}")
+        
+    return jsonify({"predictions": results})
+
+
 # ─── Gallery HTML (History page) ──────────────────────────────────────────────
 GALLERY_HTML = """
 <!DOCTYPE html>
