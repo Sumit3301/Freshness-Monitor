@@ -1,0 +1,27 @@
+[Unit]
+Description=Freshness Monitor – Pi Capture & Upload
+# Wait for the network so HTTP uploads to Render don't fail immediately
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/freshness-monitor
+
+# ── Adjust the python path / venv if you use one ──────────────────────
+# With venv:
+#   ExecStart=/home/pi/freshness-monitor/venv/bin/python pi_client.py --mode http
+# Without venv (system python3):
+ExecStart=/usr/bin/python3 /home/pi/freshness-monitor/pi_client.py --mode http
+
+# Restart automatically if the process crashes
+Restart=always
+RestartSec=10
+
+# Write all stdout/stderr to the systemd journal (view with: journalctl -u freshness-capture -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
