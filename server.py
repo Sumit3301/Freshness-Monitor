@@ -752,7 +752,38 @@ def video_feed():
     return response
 
 
-# ─── Stream Page HTML ─────────────────────────────────────────────────
+
+
+@app.route("/latest_frame.jpg", methods=["GET"])
+def latest_frame_jpg():
+    """
+    Returns the most-recent JPEG frame pushed by the Pi client.
+    Designed for JS polling: browser fetches this URL every ~100 ms.
+    Works through any reverse proxy (no long-lived connection needed).
+    """
+    from flask import Response
+    with frame_lock:
+        frame = latest_frame
+
+    if not frame:
+        img = np.zeros((360, 640, 3), dtype=np.uint8)
+        img[:] = (20, 14, 10)
+        cv2.putText(img, "Waiting for RPi camera...",
+                    (90, 190), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+                    (120, 120, 180), 2, cv2.LINE_AA)
+        cv2.putText(img, "Run: python3 pi_client.py --stream",
+                    (100, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (70, 70, 100), 1, cv2.LINE_AA)
+        _, buf = cv2.imencode(".jpg", img)
+        frame = buf.tobytes()
+
+    resp = Response(frame, mimetype="image/jpeg")
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
+
+# ─── Stream Page HTML (JS-polling — works on any cloud host) ──────────────
 VIDEO_STREAM_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -760,352 +791,182 @@ VIDEO_STREAM_HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Camera Stream — Freshness Monitor</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Inter', sans-serif;
-            background: #07091a;
-            color: #e0e6f4;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
-
-        /* ── Top Bar ── */
-        .topbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 14px 28px;
-            background: rgba(255,255,255,0.03);
-            border-bottom: 1px solid rgba(255,255,255,0.07);
-            backdrop-filter: blur(12px);
-        }
-        .topbar h1 {
-            font-size: 1.1rem;
-            font-weight: 600;
-            background: linear-gradient(90deg, #60a5fa, #a78bfa);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .topbar h1 .dot {
-            width: 10px; height: 10px;
-            background: #ef4444;
-            border-radius: 50%;
-            animation: blink 1.2s ease-in-out infinite;
-            -webkit-text-fill-color: initial;
-        }
-        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
-        .nav-links { display: flex; gap: 14px; }
-        .nav-link {
-            color: #94a3b8;
-            text-decoration: none;
-            font-size: 0.85rem;
-            padding: 6px 14px;
-            border-radius: 6px;
-            border: 1px solid rgba(255,255,255,0.08);
-            transition: all 0.2s;
-        }
+        body { font-family: 'Inter', sans-serif; background: #07091a; color: #e0e6f4;
+               min-height: 100vh; display: flex; flex-direction: column; }
+        .topbar { display: flex; align-items: center; justify-content: space-between;
+                  padding: 14px 28px; background: rgba(255,255,255,0.03);
+                  border-bottom: 1px solid rgba(255,255,255,0.07); backdrop-filter: blur(12px); }
+        .topbar h1 { font-size: 1.1rem; font-weight: 600;
+                     background: linear-gradient(90deg, #60a5fa, #a78bfa);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                     display: flex; align-items: center; gap: 10px; }
+        .rec-dot { width: 10px; height: 10px; background: #ef4444; border-radius: 50%;
+                   -webkit-text-fill-color: initial; animation: blink 1.2s ease-in-out infinite; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+        .nav-links { display: flex; gap: 12px; }
+        .nav-link { color: #94a3b8; text-decoration: none; font-size: 0.85rem;
+                    padding: 6px 14px; border-radius: 6px;
+                    border: 1px solid rgba(255,255,255,0.08); transition: all 0.2s; }
         .nav-link:hover { color: #e0e6f4; background: rgba(255,255,255,0.06); }
         .nav-link.active { color: #a78bfa; border-color: rgba(167,139,250,0.3); background: rgba(167,139,250,0.08); }
-
-        /* ── Main Layout ── */
-        .main {
-            flex: 1;
-            display: grid;
-            grid-template-columns: 1fr 340px;
-            gap: 0;
-            min-height: 0;
-        }
-        @media (max-width: 900px) {
+        .main { flex: 1; display: grid; grid-template-columns: 1fr 320px; }
+        @media (max-width: 860px) {
             .main { grid-template-columns: 1fr; }
             .sidebar { border-left: none; border-top: 1px solid rgba(255,255,255,0.07); }
         }
-
-        /* ── Stream Panel ── */
-        .stream-panel {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: #000;
-            position: relative;
-            overflow: hidden;
-        }
-        .stream-panel img {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            display: block;
-        }
-        .stream-overlay {
-            position: absolute;
-            bottom: 18px;
-            left: 50%;
-            transform: translateX(-50%);
-            display: flex;
-            gap: 10px;
-        }
-        .overlay-chip {
-            padding: 5px 14px;
-            border-radius: 20px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            backdrop-filter: blur(8px);
-            background: rgba(0,0,0,0.55);
-            border: 1px solid rgba(255,255,255,0.15);
-            letter-spacing: 0.5px;
-        }
-
-        /* ── Sidebar ── */
-        .sidebar {
-            border-left: 1px solid rgba(255,255,255,0.07);
-            background: rgba(255,255,255,0.015);
-            overflow-y: auto;
-            padding: 24px 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-
-        /* Status pill */
-        .status-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            padding: 5px 14px;
-            border-radius: 20px;
-            font-size: 0.78rem;
-            font-weight: 600;
-            background: rgba(16,185,129,0.12);
-            border: 1px solid rgba(16,185,129,0.3);
-            color: #34d399;
-            margin-bottom: 4px;
-        }
-        .status-pill .dot {
-            width: 7px; height: 7px;
-            background: #34d399;
-            border-radius: 50%;
-            animation: blink 1.2s ease-in-out infinite;
-        }
-        .status-pill.waiting {
-            background: rgba(100,116,139,0.12);
-            border-color: rgba(100,116,139,0.3);
-            color: #94a3b8;
-        }
-        .status-pill.waiting .dot { background: #94a3b8; animation: none; }
-
-        /* Section heading */
-        .section-label {
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 1.5px;
-            color: #475569;
-            margin-bottom: 10px;
-        }
-
-        /* Stage card */
-        .stage-card {
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.07);
-            border-radius: 14px;
-            padding: 18px;
-        }
-        .stage-badge {
-            display: flex;
-            align-items: center;
-            gap: 14px;
-            margin-bottom: 16px;
-        }
-        .stage-dot {
-            width: 44px; height: 44px;
-            border-radius: 50%;
-            flex-shrink: 0;
-            animation: pulse 2s ease-in-out infinite;
-        }
+        .stream-panel { background: #000; display: flex; align-items: center;
+                         justify-content: center; position: relative; overflow: hidden; min-height: 360px; }
+        #streamImg { width: 100%; height: 100%; object-fit: contain; display: block; }
+        .overlay { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+                   display: flex; gap: 8px; }
+        .chip { padding: 4px 14px; border-radius: 20px; font-size: 0.75rem; font-weight: 600;
+                backdrop-filter: blur(8px); background: rgba(0,0,0,0.6);
+                border: 1px solid rgba(255,255,255,0.15); }
+        .sidebar { border-left: 1px solid rgba(255,255,255,0.07);
+                   background: rgba(255,255,255,0.015);
+                   padding: 22px 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
+        .section-label { font-size: 0.7rem; text-transform: uppercase;
+                         letter-spacing: 1.5px; color: #475569; margin-bottom: 8px; }
+        .status-pill { display: inline-flex; align-items: center; gap: 6px;
+                       padding: 5px 13px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; }
+        .pill-live { background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.3); color: #34d399; }
+        .pill-wait { background: rgba(100,116,139,0.12); border: 1px solid rgba(100,116,139,0.3); color: #94a3b8; }
+        .pill-dot { width: 7px; height: 7px; border-radius: 50%; }
+        .dot-live { background: #34d399; animation: blink 1.2s ease-in-out infinite; }
+        .dot-wait { background: #94a3b8; }
+        .stage-card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07);
+                      border-radius: 14px; padding: 16px; }
+        .stage-badge { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+        .stage-dot { width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0;
+                     animation: pulse 2s ease-in-out infinite; }
         @keyframes pulse {
-            0%,100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.25); }
-            50%      { box-shadow: 0 0 16px 5px rgba(255,255,255,0.1); }
+            0%,100%{box-shadow:0 0 0 0 rgba(255,255,255,0.2)}
+            50%{box-shadow:0 0 14px 4px rgba(255,255,255,0.08)}
         }
-        .stage-name { font-size: 1.05rem; font-weight: 700; }
-        .stage-conf { font-size: 0.8rem; color: #94a3b8; margin-top: 2px; }
-
-        /* Confidence bar */
-        .conf-bar-wrap { margin-bottom: 4px; }
-        .conf-label { font-size: 0.75rem; color: #64748b; margin-bottom: 6px; }
-        .conf-bar {
-            height: 8px; border-radius: 4px;
-            background: rgba(255,255,255,0.07);
-            overflow: hidden;
-        }
-        .conf-fill {
-            height: 100%; border-radius: 4px;
-            transition: width 0.8s ease, background 0.5s ease;
-        }
-
-        /* Prob rows */
-        .prob-list { display: flex; flex-direction: column; gap: 10px; }
-        .prob-item { display: flex; align-items: center; gap: 10px; }
-        .prob-name { font-size: 0.72rem; color: #94a3b8; width: 110px; flex-shrink: 0; }
-        .prob-bar {
-            flex: 1; height: 6px; border-radius: 3px;
-            background: rgba(255,255,255,0.06); overflow: hidden;
-        }
-        .prob-fill { height: 100%; border-radius: 3px; transition: width 0.8s ease; }
-        .prob-pct { font-size: 0.72rem; font-weight: 600; width: 38px; text-align: right; }
-
-        /* Camera info */
-        .info-card {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 12px;
-            padding: 14px 16px;
-            font-size: 0.78rem;
-            color: #64748b;
-            line-height: 1.7;
-        }
-        .info-card code {
-            background: rgba(255,255,255,0.06);
-            padding: 1px 6px;
-            border-radius: 4px;
-            font-family: monospace;
-            font-size: 0.75rem;
-            color: #c4b5fd;
-        }
+        .stage-name { font-size: 1rem; font-weight: 700; }
+        .stage-conf { font-size: 0.78rem; color: #94a3b8; margin-top: 2px; }
+        .conf-bar { height: 7px; border-radius: 4px; background: rgba(255,255,255,0.07); overflow: hidden; margin-top: 2px; }
+        .conf-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease, background 0.4s; }
+        .prob-list { display: flex; flex-direction: column; gap: 9px; }
+        .prob-item { display: flex; align-items: center; gap: 8px; }
+        .prob-name { font-size: 0.7rem; color: #94a3b8; width: 105px; flex-shrink: 0; }
+        .prob-bar { flex: 1; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.06); overflow: hidden; }
+        .prob-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
+        .prob-pct { font-size: 0.7rem; font-weight: 600; width: 36px; text-align: right; }
+        .info-card { background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.06);
+                     border-radius: 10px; padding: 13px 15px; font-size: 0.76rem; color: #64748b; line-height: 1.75; }
+        .info-card code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px;
+                          font-family: monospace; color: #c4b5fd; font-size: 0.73rem; }
+        #fps-badge { font-size: 0.68rem; color: #475569; margin-top: 4px; }
     </style>
 </head>
 <body>
-
 <div class="topbar">
-    <h1>
-        <span class="dot"></span>
-        Live Camera Feed
-    </h1>
+    <h1><span class="rec-dot"></span> Live Camera Feed</h1>
     <div class="nav-links">
-        <a href="/dashboard" class="nav-link">⬡ Dashboard</a>
-        <a href="/result/latest" class="nav-link">📋 Latest Result</a>
-        <a href="/stream" class="nav-link active">📷 Live Stream</a>
+        <a href="/dashboard" class="nav-link">Dashboard</a>
+        <a href="/result/latest" class="nav-link">Latest Result</a>
+        <a href="/stream" class="nav-link active">Live Stream</a>
     </div>
 </div>
-
 <div class="main">
-    <!-- Stream -->
     <div class="stream-panel">
-        <img src="/video_feed" alt="RPi Camera Stream" id="streamImg">
-        <div class="stream-overlay">
-            <div class="overlay-chip" id="overlayStage">Waiting...</div>
-            <div class="overlay-chip" id="overlayConf"></div>
+        <img id="streamImg" alt="RPi Camera" src="/latest_frame.jpg">
+        <div class="overlay">
+            <div class="chip" id="chipStage">Waiting...</div>
+            <div class="chip" id="chipConf"></div>
         </div>
     </div>
-
-    <!-- Sidebar -->
     <div class="sidebar">
-
-        <!-- Camera status -->
         <div>
             <div class="section-label">Camera Status</div>
-            <div class="status-pill waiting" id="camStatus">
-                <span class="dot"></span>
-                <span id="camStatusText">Waiting for Pi camera…</span>
+            <div class="status-pill pill-wait" id="camPill">
+                <span class="pill-dot dot-wait" id="pillDot"></span>
+                <span id="camText">Waiting for Pi...</span>
             </div>
+            <div id="fps-badge"></div>
         </div>
-
-        <!-- Classification -->
         <div class="stage-card">
             <div class="section-label">Latest Classification</div>
             <div class="stage-badge">
                 <div class="stage-dot" id="stageDot" style="background:#334155"></div>
                 <div>
-                    <div class="stage-name" id="stageName">—</div>
+                    <div class="stage-name" id="stageName">-</div>
                     <div class="stage-conf" id="stageConf">No prediction yet</div>
                 </div>
             </div>
-            <div class="conf-bar-wrap">
-                <div class="conf-label">Confidence</div>
-                <div class="conf-bar">
-                    <div class="conf-fill" id="confFill" style="width:0%;background:#334155"></div>
-                </div>
-            </div>
+            <div class="section-label" style="margin-top:4px">Confidence</div>
+            <div class="conf-bar"><div class="conf-fill" id="confFill" style="width:0%;background:#334155"></div></div>
         </div>
-
-        <!-- Stage probabilities -->
         <div>
             <div class="section-label">Stage Probabilities</div>
             <div class="prob-list" id="probList"></div>
         </div>
-
-        <!-- Info -->
         <div class="info-card">
-            The RPi camera streams frames by calling<br>
-            <code>POST /frame</code> from <code>pi_client.py</code>.<br><br>
-            If the feed is dark/frozen, ensure the Pi client is running and the camera module is connected (check with <code>vcgencmd get_camera</code> on the Pi).
+            Pi streams by running:<br>
+            <code>python3 pi_client.py --stream</code><br><br>
+            Camera check on Pi:<br>
+            <code>vcgencmd get_camera</code>
         </div>
-
     </div>
 </div>
-
 <script>
-const STAGE_COLORS = ['#2ecc71','#f1c40f','#e67e22','#e74c3c'];
-const STAGE_NAMES  = ['Stage 1 - Very Fresh','Stage 2 - Fresh','Stage 3 - Early Spoilage','Stage 4 - Spoiled'];
+const COLORS = ['#2ecc71','#f1c40f','#e67e22','#e74c3c'];
+const imgEl  = document.getElementById('streamImg');
 
-let lastFrameCount = 0;    // simple way to detect if Pi is pushing frames
+// JS-Polling stream: each request is a plain GET, works through any proxy.
+let frameCount = 0, lastCheck = Date.now();
+
+function pollFrame() {
+    const url = '/latest_frame.jpg?t=' + Date.now();
+    const next = new Image();
+    next.onload = () => { imgEl.src = next.src; frameCount++; setTimeout(pollFrame, 100); };
+    next.onerror = () => { setTimeout(pollFrame, 400); };
+    next.src = url;
+}
+pollFrame();
+
+setInterval(() => {
+    const fps = (frameCount / ((Date.now() - lastCheck) / 1000)).toFixed(1);
+    document.getElementById('fps-badge').textContent = fps + ' fps';
+    frameCount = 0; lastCheck = Date.now();
+}, 3000);
 
 async function refreshStatus() {
     try {
-        const res  = await fetch('/status');
-        const data = await res.json();
-
+        const data = await fetch('/status').then(r => r.json());
         const p = data.last_prediction;
         if (p) {
-            // Camera / feed status
-            const pill = document.getElementById('camStatus');
-            pill.className = 'status-pill';
-            document.getElementById('camStatusText').textContent = 'RPi Camera Active';
-
-            // Stage
-            const color = p.stage_color || '#94a3b8';
-            document.getElementById('stageDot').style.background = color;
+            document.getElementById('camPill').className = 'status-pill pill-live';
+            document.getElementById('pillDot').className = 'pill-dot dot-live';
+            document.getElementById('camText').textContent = 'RPi Camera Active';
+            const c = p.stage_color || '#94a3b8';
+            document.getElementById('stageDot').style.background = c;
             document.getElementById('stageName').textContent = p.stage_name;
-            document.getElementById('stageConf').textContent =
-                'Confidence: ' + (p.confidence * 100).toFixed(1) + '%';
-
-            // Confidence bar
+            document.getElementById('stageConf').textContent = 'Confidence: ' + (p.confidence*100).toFixed(1) + '%';
             const fill = document.getElementById('confFill');
-            fill.style.width  = (p.confidence * 100).toFixed(1) + '%';
-            fill.style.background = color;
-
-            // Overlay chips
-            document.getElementById('overlayStage').textContent = p.stage_name;
-            document.getElementById('overlayStage').style.color = color;
-            document.getElementById('overlayConf').textContent =
-                (p.confidence * 100).toFixed(1) + '%';
-
-            // Probabilities
+            fill.style.width = (p.confidence*100).toFixed(1) + '%'; fill.style.background = c;
+            document.getElementById('chipStage').textContent = p.stage_name;
+            document.getElementById('chipStage').style.color = c;
+            document.getElementById('chipConf').textContent = (p.confidence*100).toFixed(1) + '%';
             const list = document.getElementById('probList');
             if (p.stage_probabilities) {
                 list.innerHTML = '';
                 Object.entries(p.stage_probabilities).forEach(([name, prob], i) => {
-                    const c = STAGE_COLORS[i] || '#94a3b8';
-                    const pct = (prob * 100).toFixed(1);
-                    const item = document.createElement('div');
-                    item.className = 'prob-item';
-                    item.innerHTML = `
-                        <div class="prob-name">${name}</div>
-                        <div class="prob-bar">
-                            <div class="prob-fill" style="width:${pct}%;background:${c}"></div>
-                        </div>
-                        <div class="prob-pct" style="color:${c}">${pct}%</div>`;
-                    list.appendChild(item);
+                    const col = COLORS[i] || '#94a3b8', pct = (prob*100).toFixed(1);
+                    const el = document.createElement('div'); el.className = 'prob-item';
+                    el.innerHTML = '<div class="prob-name">' + name + '</div>' +
+                        '<div class="prob-bar"><div class="prob-fill" style="width:' + pct + '%;background:' + col + '"></div></div>' +
+                        '<div class="prob-pct" style="color:' + col + '">' + pct + '%</div>';
+                    list.appendChild(el);
                 });
             }
         }
-    } catch (e) { /* ignore */ }
+    } catch(e) {}
 }
-
 refreshStatus();
 setInterval(refreshStatus, 2000);
 </script>
