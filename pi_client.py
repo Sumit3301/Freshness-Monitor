@@ -328,10 +328,13 @@ def stream_video_feed(
                     t0 = time.time() # Reset t0 so we don't sleep negatively
                     logger.info("▶️ Resuming live stream.")
 
-                # Capture a numpy array in BGR order (cv2.imencode expects BGR)
-                frame = camera.capture_array()           # BGR numpy array
+                # picamera2 returns an RGB array by default.
+                # cv2.imencode expects a BGR array, so we must swap channels to avoid blue/orange shift.
                 import numpy as np, cv2
-                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                frame_rgb = camera.capture_array()
+                frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+
+                ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if not ok:
                     continue
                 jpeg_bytes = buf.tobytes()
