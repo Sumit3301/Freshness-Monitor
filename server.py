@@ -8,12 +8,15 @@ Flask Inference Server
 Real-time freshness classification server with multi-stage detection.
 
 Endpoints:
-  POST /predict       — upload image, get stage classification + color data
-  GET  /status        — server health + last prediction
-  GET  /dashboard     — real-time web dashboard
-  GET  /history       — JSON list of recent predictions
-  POST /barcode       — upload image, get QR code with freshness stage info
-  GET  /barcode/<id>  — retrieve a generated barcode image
+  POST /predict        — upload image, get stage classification + color data
+  GET  /status         — server health + last prediction
+  GET  /dashboard      — real-time web dashboard
+  GET  /history        — JSON list of recent predictions
+  POST /barcode        — upload image, get QR code with freshness stage info
+  GET  /barcode/<id>   — retrieve a generated barcode image
+  POST /frame          — Pi client pushes a raw JPEG frame here
+  GET  /video_feed     — MJPEG stream composed of frames from the Pi camera
+  GET  /stream         — standalone live video stream webpage
 
 Usage:
   python server.py
@@ -49,6 +52,12 @@ scaler = None
 prediction_history = deque(maxlen=100)
 result_store = {}          # barcode_id -> {result + image_base64}
 server_start_time = None
+
+# ─── Live Video Frame Buffer ─────────────────────────────────────────
+# The Pi client pushes raw JPEG bytes here via POST /frame.
+# GET /video_feed reads from this buffer to serve an MJPEG stream.
+latest_frame: bytes = b""           # raw JPEG bytes of the most-recent frame
+frame_lock = threading.Lock()       # protects latest_frame
 
 
 def load_model():
@@ -658,6 +667,454 @@ window.addEventListener("unload", function() {
 """
 
 
+# ─── Live Video Streaming ───────────────────────────────────────────
+
+@app.route("/frame", methods=["POST"])
+def receive_frame():
+    """
+    Pi client pushes one raw JPEG frame here (Content-Type: image/jpeg).
+    The frame is buffered in memory and served by /video_feed.
+
+    Usage (from pi_client.py):
+      requests.post(SERVER_URL + "/frame", data=jpeg_bytes,
+                    headers={"Content-Type": "image/jpeg"})
+    """
+    global latest_frame
+    raw = request.get_data()          # raw JPEG bytes
+    if not raw:
+        return jsonify({"error": "No frame data"}), 400
+    with frame_lock:
+        latest_frame = raw
+    return jsonify({"ok": True}), 200
+
+
+def _generate_mjpeg():
+    """Generator that yields MJPEG frames from the Pi-pushed buffer."""
+    # A 1×1 dark placeholder shown when no Pi frame has arrived yet.
+    PLACEHOLDER = (
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+        b"\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t"
+        b"\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a"
+        b"\x1f\x1e\x1d\x1a\x1c\x1c $.' \",#\x1c\x1c(7),01444\x1f'9=82<.342\x1e"
+        b"\x00\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xc4"
+        b"\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00"
+        b"\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\xff"
+        b"\xc4\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04"
+        b"\x00\x00\x01}\x01\x02\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa\x07"
+        b"\"q\x142\x81\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br\x82\t\n"
+        b"\x16\x17\x18\x19\x1a%&\'()*456789:CDEFGHIJSTUVWXYZcdefghijstuvwxyz"
+        b"\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95\x96\x97\x98\x99"
+        b"\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7"
+        b"\xb8\xb9\xba\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5"
+        b"\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xf1"
+        b"\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda\x00\x08\x01\x01\x00"
+        b"\x00?\x00\xfb\xd4P\x00\x00\x00\x1f\xff\xd9"
+    )
+
+    # Use OpenCV to generate a proper "waiting" placeholder image.
+    def _make_waiting_frame():
+        img = np.zeros((360, 640, 3), dtype=np.uint8)
+        img[:] = (20, 14, 10)   # dark background (BGR)
+        cv2.putText(img, "Waiting for RPi camera...",
+                    (90, 190), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+                    (120, 120, 180), 2, cv2.LINE_AA)
+        cv2.putText(img, "POST /frame from pi_client.py",
+                    (130, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (70, 70, 100), 1, cv2.LINE_AA)
+        _, buf = cv2.imencode(".jpg", img)
+        return buf.tobytes()
+
+    waiting_frame = _make_waiting_frame()
+
+    while True:
+        with frame_lock:
+            frame = latest_frame if latest_frame else waiting_frame
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+        )
+        time.sleep(0.05)   # ~20 fps cap; adjust freely
+
+
+@app.route("/video_feed", methods=["GET"])
+def video_feed():
+    """MJPEG stream of RPi camera frames (pushed via POST /frame)."""
+    from flask import Response
+    return Response(
+        _generate_mjpeg(),
+        mimetype="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+# ─── Stream Page HTML ─────────────────────────────────────────────────
+VIDEO_STREAM_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Camera Stream — Freshness Monitor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #07091a;
+            color: #e0e6f4;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ── Top Bar ── */
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 28px;
+            background: rgba(255,255,255,0.03);
+            border-bottom: 1px solid rgba(255,255,255,0.07);
+            backdrop-filter: blur(12px);
+        }
+        .topbar h1 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            background: linear-gradient(90deg, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .topbar h1 .dot {
+            width: 10px; height: 10px;
+            background: #ef4444;
+            border-radius: 50%;
+            animation: blink 1.2s ease-in-out infinite;
+            -webkit-text-fill-color: initial;
+        }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+        .nav-links { display: flex; gap: 14px; }
+        .nav-link {
+            color: #94a3b8;
+            text-decoration: none;
+            font-size: 0.85rem;
+            padding: 6px 14px;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.08);
+            transition: all 0.2s;
+        }
+        .nav-link:hover { color: #e0e6f4; background: rgba(255,255,255,0.06); }
+        .nav-link.active { color: #a78bfa; border-color: rgba(167,139,250,0.3); background: rgba(167,139,250,0.08); }
+
+        /* ── Main Layout ── */
+        .main {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 340px;
+            gap: 0;
+            min-height: 0;
+        }
+        @media (max-width: 900px) {
+            .main { grid-template-columns: 1fr; }
+            .sidebar { border-left: none; border-top: 1px solid rgba(255,255,255,0.07); }
+        }
+
+        /* ── Stream Panel ── */
+        .stream-panel {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            position: relative;
+            overflow: hidden;
+        }
+        .stream-panel img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+        .stream-overlay {
+            position: absolute;
+            bottom: 18px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+        }
+        .overlay-chip {
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            backdrop-filter: blur(8px);
+            background: rgba(0,0,0,0.55);
+            border: 1px solid rgba(255,255,255,0.15);
+            letter-spacing: 0.5px;
+        }
+
+        /* ── Sidebar ── */
+        .sidebar {
+            border-left: 1px solid rgba(255,255,255,0.07);
+            background: rgba(255,255,255,0.015);
+            overflow-y: auto;
+            padding: 24px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        /* Status pill */
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            background: rgba(16,185,129,0.12);
+            border: 1px solid rgba(16,185,129,0.3);
+            color: #34d399;
+            margin-bottom: 4px;
+        }
+        .status-pill .dot {
+            width: 7px; height: 7px;
+            background: #34d399;
+            border-radius: 50%;
+            animation: blink 1.2s ease-in-out infinite;
+        }
+        .status-pill.waiting {
+            background: rgba(100,116,139,0.12);
+            border-color: rgba(100,116,139,0.3);
+            color: #94a3b8;
+        }
+        .status-pill.waiting .dot { background: #94a3b8; animation: none; }
+
+        /* Section heading */
+        .section-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: #475569;
+            margin-bottom: 10px;
+        }
+
+        /* Stage card */
+        .stage-card {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.07);
+            border-radius: 14px;
+            padding: 18px;
+        }
+        .stage-badge {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 16px;
+        }
+        .stage-dot {
+            width: 44px; height: 44px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%,100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.25); }
+            50%      { box-shadow: 0 0 16px 5px rgba(255,255,255,0.1); }
+        }
+        .stage-name { font-size: 1.05rem; font-weight: 700; }
+        .stage-conf { font-size: 0.8rem; color: #94a3b8; margin-top: 2px; }
+
+        /* Confidence bar */
+        .conf-bar-wrap { margin-bottom: 4px; }
+        .conf-label { font-size: 0.75rem; color: #64748b; margin-bottom: 6px; }
+        .conf-bar {
+            height: 8px; border-radius: 4px;
+            background: rgba(255,255,255,0.07);
+            overflow: hidden;
+        }
+        .conf-fill {
+            height: 100%; border-radius: 4px;
+            transition: width 0.8s ease, background 0.5s ease;
+        }
+
+        /* Prob rows */
+        .prob-list { display: flex; flex-direction: column; gap: 10px; }
+        .prob-item { display: flex; align-items: center; gap: 10px; }
+        .prob-name { font-size: 0.72rem; color: #94a3b8; width: 110px; flex-shrink: 0; }
+        .prob-bar {
+            flex: 1; height: 6px; border-radius: 3px;
+            background: rgba(255,255,255,0.06); overflow: hidden;
+        }
+        .prob-fill { height: 100%; border-radius: 3px; transition: width 0.8s ease; }
+        .prob-pct { font-size: 0.72rem; font-weight: 600; width: 38px; text-align: right; }
+
+        /* Camera info */
+        .info-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 12px;
+            padding: 14px 16px;
+            font-size: 0.78rem;
+            color: #64748b;
+            line-height: 1.7;
+        }
+        .info-card code {
+            background: rgba(255,255,255,0.06);
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.75rem;
+            color: #c4b5fd;
+        }
+    </style>
+</head>
+<body>
+
+<div class="topbar">
+    <h1>
+        <span class="dot"></span>
+        Live Camera Feed
+    </h1>
+    <div class="nav-links">
+        <a href="/dashboard" class="nav-link">⬡ Dashboard</a>
+        <a href="/result/latest" class="nav-link">📋 Latest Result</a>
+        <a href="/stream" class="nav-link active">📷 Live Stream</a>
+    </div>
+</div>
+
+<div class="main">
+    <!-- Stream -->
+    <div class="stream-panel">
+        <img src="/video_feed" alt="RPi Camera Stream" id="streamImg">
+        <div class="stream-overlay">
+            <div class="overlay-chip" id="overlayStage">Waiting...</div>
+            <div class="overlay-chip" id="overlayConf"></div>
+        </div>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+
+        <!-- Camera status -->
+        <div>
+            <div class="section-label">Camera Status</div>
+            <div class="status-pill waiting" id="camStatus">
+                <span class="dot"></span>
+                <span id="camStatusText">Waiting for Pi camera…</span>
+            </div>
+        </div>
+
+        <!-- Classification -->
+        <div class="stage-card">
+            <div class="section-label">Latest Classification</div>
+            <div class="stage-badge">
+                <div class="stage-dot" id="stageDot" style="background:#334155"></div>
+                <div>
+                    <div class="stage-name" id="stageName">—</div>
+                    <div class="stage-conf" id="stageConf">No prediction yet</div>
+                </div>
+            </div>
+            <div class="conf-bar-wrap">
+                <div class="conf-label">Confidence</div>
+                <div class="conf-bar">
+                    <div class="conf-fill" id="confFill" style="width:0%;background:#334155"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stage probabilities -->
+        <div>
+            <div class="section-label">Stage Probabilities</div>
+            <div class="prob-list" id="probList"></div>
+        </div>
+
+        <!-- Info -->
+        <div class="info-card">
+            The RPi camera streams frames by calling<br>
+            <code>POST /frame</code> from <code>pi_client.py</code>.<br><br>
+            If the feed is dark/frozen, ensure the Pi client is running and the camera module is connected (check with <code>vcgencmd get_camera</code> on the Pi).
+        </div>
+
+    </div>
+</div>
+
+<script>
+const STAGE_COLORS = ['#2ecc71','#f1c40f','#e67e22','#e74c3c'];
+const STAGE_NAMES  = ['Stage 1 - Very Fresh','Stage 2 - Fresh','Stage 3 - Early Spoilage','Stage 4 - Spoiled'];
+
+let lastFrameCount = 0;    // simple way to detect if Pi is pushing frames
+
+async function refreshStatus() {
+    try {
+        const res  = await fetch('/status');
+        const data = await res.json();
+
+        const p = data.last_prediction;
+        if (p) {
+            // Camera / feed status
+            const pill = document.getElementById('camStatus');
+            pill.className = 'status-pill';
+            document.getElementById('camStatusText').textContent = 'RPi Camera Active';
+
+            // Stage
+            const color = p.stage_color || '#94a3b8';
+            document.getElementById('stageDot').style.background = color;
+            document.getElementById('stageName').textContent = p.stage_name;
+            document.getElementById('stageConf').textContent =
+                'Confidence: ' + (p.confidence * 100).toFixed(1) + '%';
+
+            // Confidence bar
+            const fill = document.getElementById('confFill');
+            fill.style.width  = (p.confidence * 100).toFixed(1) + '%';
+            fill.style.background = color;
+
+            // Overlay chips
+            document.getElementById('overlayStage').textContent = p.stage_name;
+            document.getElementById('overlayStage').style.color = color;
+            document.getElementById('overlayConf').textContent =
+                (p.confidence * 100).toFixed(1) + '%';
+
+            // Probabilities
+            const list = document.getElementById('probList');
+            if (p.stage_probabilities) {
+                list.innerHTML = '';
+                Object.entries(p.stage_probabilities).forEach(([name, prob], i) => {
+                    const c = STAGE_COLORS[i] || '#94a3b8';
+                    const pct = (prob * 100).toFixed(1);
+                    const item = document.createElement('div');
+                    item.className = 'prob-item';
+                    item.innerHTML = `
+                        <div class="prob-name">${name}</div>
+                        <div class="prob-bar">
+                            <div class="prob-fill" style="width:${pct}%;background:${c}"></div>
+                        </div>
+                        <div class="prob-pct" style="color:${c}">${pct}%</div>`;
+                    list.appendChild(item);
+                });
+            }
+        }
+    } catch (e) { /* ignore */ }
+}
+
+refreshStatus();
+setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>
+"""
+
+
+@app.route("/stream", methods=["GET"])
+def stream_page():
+    """Standalone live video stream webpage."""
+    from flask import render_template_string
+    return render_template_string(VIDEO_STREAM_HTML)
+
+
 @app.route("/status", methods=["GET"])
 def status():
     """Server health check."""
@@ -851,6 +1308,15 @@ DASHBOARD_HTML = """
         <header>
             <h1>Freshness Monitor</h1>
             <p class="subtitle">Multi-stage film color change detection with barcode tracking</p>
+            <div style="margin-top:14px;">
+                <a href="/stream" style="display:inline-block;padding:8px 20px;border-radius:8px;
+                   background:linear-gradient(135deg,rgba(96,165,250,0.15),rgba(167,139,250,0.15));
+                   border:1px solid rgba(167,139,250,0.3);color:#a78bfa;
+                   text-decoration:none;font-size:0.88em;font-weight:600;
+                   transition:all 0.2s;" onmouseover="this.style.background='linear-gradient(135deg,rgba(96,165,250,0.25),rgba(167,139,250,0.25))'" onmouseout="this.style.background='linear-gradient(135deg,rgba(96,165,250,0.15),rgba(167,139,250,0.15))'">
+                   📷 Live Stream
+                </a>
+            </div>
         </header>
 
         <div class="stage-bar" id="stageBar">
@@ -1074,8 +1540,10 @@ def main():
 
     print(f"\nServer starting on http://{config.SERVER_HOST}:{port}")
     print(f"Dashboard:  http://localhost:{port}/dashboard")
+    print(f"Stream:     http://localhost:{port}/stream")
     print(f"Predict:    POST http://localhost:{port}/predict")
     print(f"Barcode:    POST http://localhost:{port}/barcode")
+    print(f"Pi Frame:   POST http://localhost:{port}/frame")
     print(f"Watching:   {config.INCOMING_DIR}")
     print()
 

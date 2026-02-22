@@ -6,6 +6,7 @@ This script runs on the Raspberry Pi and:
   1. Captures images from the Pi Camera at regular intervals
   2. Transfers them to the local server via SCP or HTTP POST
   3. Logs transfer status and server responses
+  4. Streams live video to the server dashboard (--stream mode)
 
 Requirements on the Pi:
   pip3 install picamera2 paramiko requests
@@ -14,6 +15,8 @@ Setup:
   1. Update the configuration below with your server's IP address
   2. Set up SSH key auth:  ssh-keygen && ssh-copy-id user@server_ip
   3. Run:  python3 pi_client.py --mode scp   (or --mode http)
+  4. For live streaming:  python3 pi_client.py --stream
+• Camera check (on Pi):  vcgencmd get_camera
 """
 
 import os
@@ -31,6 +34,7 @@ from pathlib import Path
 RENDER_URL     = "https://freshness-monitor.onrender.com"  # ← Your Render URL
 HTTP_PREDICT   = f"{RENDER_URL}/predict"
 HTTP_BARCODE   = f"{RENDER_URL}/barcode"
+HTTP_FRAME     = f"{RENDER_URL}/frame"   # live video frame endpoint
 
 # Local PC server — file storage only
 LOCAL_SERVER_IP   = "100.108.137.17"      # ← Your PC's Tailscale IP
@@ -43,6 +47,11 @@ CAPTURE_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "captu
 CAPTURE_INTERVAL = 10                 # Seconds between captures
 IMAGE_WIDTH    = 1920
 IMAGE_HEIGHT   = 1080
+
+# ─── Video Stream Settings ──────────────────────────────────────────
+STREAM_WIDTH   = 640    # lower resolution for smooth streaming
+STREAM_HEIGHT  = 480
+STREAM_FPS     = 15     # target frames per second for live stream
 
 # ─── Logging Setup ──────────────────────────────────────────────────
 Path(CAPTURE_DIR).mkdir(parents=True, exist_ok=True)
@@ -226,6 +235,105 @@ def transfer_paramiko(filepath: str) -> bool:
         return False
 
 
+def stream_video_feed(camera_method: str, fps: int = STREAM_FPS, frame_url: str = HTTP_FRAME):
+    """
+    Continuously captures frames from the Pi camera and pushes them to
+    POST /frame on the server, powering the /stream live-view webpage.
+
+    Run this in a separate terminal (or thread) while the Pi also runs
+    run_continuous_capture() for periodic high-res classification.
+
+    Args:
+        camera_method : 'picamera2' (default) or 'libcamera'
+        fps           : target push rate (frames/second)
+        frame_url     : server endpoint to POST frames to
+    """
+    import requests
+    import io
+
+    interval = 1.0 / max(1, fps)
+    logger.info("=" * 50)
+    logger.info("Freshness Monitor — Live Video Stream")
+    logger.info(f"   Camera   : {camera_method}")
+    logger.info(f"   Target   : {frame_url}")
+    logger.info(f"   Rate     : {fps} fps  (interval={interval:.3f}s)")
+    logger.info("=" * 50)
+    logger.info("Tip: verify camera with  vcgencmd get_camera  on the Pi")
+
+    if camera_method == "picamera2":
+        try:
+            from picamera2 import Picamera2
+        except ImportError:
+            logger.error("picamera2 not installed. Run: sudo apt install python3-picamera2")
+            sys.exit(1)
+
+        camera = Picamera2()
+        cfg = camera.create_video_configuration(
+            main={"size": (STREAM_WIDTH, STREAM_HEIGHT), "format": "RGB888"}
+        )
+        camera.configure(cfg)
+        camera.start()
+        time.sleep(1)   # let auto-exposure settle
+        logger.info("📷 Pi Camera started — streaming…")
+
+        try:
+            while True:
+                t0 = time.time()
+                # Capture a numpy array, encode as JPEG
+                frame = camera.capture_array()           # RGB numpy array
+                import numpy as np, cv2
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if not ok:
+                    continue
+                jpeg_bytes = buf.tobytes()
+
+                try:
+                    requests.post(
+                        frame_url,
+                        data=jpeg_bytes,
+                        headers={"Content-Type": "image/jpeg"},
+                        timeout=2,
+                    )
+                except Exception as e:
+                    logger.warning(f"Frame push failed: {e}")
+
+                elapsed = time.time() - t0
+                sleep_for = max(0.0, interval - elapsed)
+                time.sleep(sleep_for)
+
+        except KeyboardInterrupt:
+            logger.info("\n🛑 Stream stopped by user")
+        finally:
+            camera.stop()
+            camera.close()
+
+    else:  # libcamera fallback — lower fps, uses CLI
+        logger.warning("libcamera fallback: streaming will be slow (~1fps)")
+        try:
+            import requests
+            while True:
+                t0 = time.time()
+                filepath = capture_image_libcamera()
+                if filepath:
+                    with open(filepath, "rb") as f:
+                        jpeg_bytes = f.read()
+                    try:
+                        requests.post(
+                            frame_url,
+                            data=jpeg_bytes,
+                            headers={"Content-Type": "image/jpeg"},
+                            timeout=2,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Frame push failed: {e}")
+                    os.remove(filepath)  # cleanup temp file
+                elapsed = time.time() - t0
+                time.sleep(max(0.0, interval - elapsed))
+        except KeyboardInterrupt:
+            logger.info("\n🛑 Stream stopped by user")
+
+
 def run_continuous_capture(mode: str, camera_method: str):
     """
     Main loop: capture images and transfer them continuously.
@@ -346,11 +454,33 @@ if __name__ == "__main__":
         action="store_true",
         help="Test server connectivity without capturing",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Stream live video to the server /stream page (pushes JPEG frames to /frame)",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=STREAM_FPS,
+        help=f"Target frames/second for --stream mode (default: {STREAM_FPS})",
+    )
+    parser.add_argument(
+        "--stream-url",
+        default=HTTP_FRAME,
+        help=f"Server /frame endpoint URL for streaming (default: {HTTP_FRAME})",
+    )
     args = parser.parse_args()
 
     CAPTURE_INTERVAL = args.interval
 
-    if args.test:
+    if args.stream:
+        stream_video_feed(
+            camera_method=args.camera,
+            fps=args.fps,
+            frame_url=args.stream_url,
+        )
+    elif args.test:
         test_connection(args.mode)
     else:
         run_continuous_capture(args.mode, args.camera)
