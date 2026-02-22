@@ -269,7 +269,7 @@ def stream_video_feed(camera_method: str, fps: int = STREAM_FPS, frame_url: str 
 
         camera = Picamera2()
         cfg = camera.create_video_configuration(
-            main={"size": (STREAM_WIDTH, STREAM_HEIGHT), "format": "RGB888"}
+            main={"size": (STREAM_WIDTH, STREAM_HEIGHT), "format": "BGR888"}
         )
         camera.configure(cfg)
         camera.start()
@@ -279,11 +279,10 @@ def stream_video_feed(camera_method: str, fps: int = STREAM_FPS, frame_url: str 
         try:
             while True:
                 t0 = time.time()
-                # Capture a numpy array, encode as JPEG
-                frame = camera.capture_array()           # RGB numpy array
+                # Capture a numpy array in BGR order (cv2.imencode expects BGR)
+                frame = camera.capture_array()           # BGR numpy array
                 import numpy as np, cv2
-                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if not ok:
                     continue
                 jpeg_bytes = buf.tobytes()
