@@ -869,6 +869,7 @@ VIDEO_STREAM_HTML = """
     <div class="nav-links">
         <a href="/dashboard" class="nav-link">Dashboard</a>
         <a href="/result/latest" class="nav-link">Latest Result</a>
+        <a href="/gallery" class="nav-link">Gallery</a>
         <a href="/stream" class="nav-link active">Live Stream</a>
     </div>
 </div>
@@ -1021,7 +1022,126 @@ def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
 
-# ─── Dashboard HTML ─────────────────────────────────────────────────
+# ─── Gallery HTML (History page) ──────────────────────────────────────────────
+GALLERY_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>History Gallery — Freshness Monitor</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: #07091a; color: #e0e6f4; min-height: 100vh; }
+        
+        .topbar { display: flex; align-items: center; justify-content: space-between;
+                  padding: 14px 28px; background: rgba(255,255,255,0.03);
+                  border-bottom: 1px solid rgba(255,255,255,0.07); backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 10; }
+        .topbar h1 { font-size: 1.1rem; font-weight: 600;
+                     background: linear-gradient(90deg, #34d399, #10b981);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .nav-links { display: flex; gap: 12px; }
+        .nav-link { color: #94a3b8; text-decoration: none; font-size: 0.85rem;
+                    padding: 6px 14px; border-radius: 6px;
+                    border: 1px solid rgba(255,255,255,0.08); transition: all 0.2s; }
+        .nav-link:hover { color: #e0e6f4; background: rgba(255,255,255,0.06); }
+        .nav-link.active { color: #34d399; border-color: rgba(52,211,153,0.3); background: rgba(52,211,153,0.08); }
+        
+        .container { max-width: 1400px; margin: 0 auto; padding: 30px; }
+        .header { margin-bottom: 30px; }
+        .header h2 { font-size: 1.8rem; font-weight: 700; margin-bottom: 8px; }
+        .header p { color: #94a3b8; font-size: 0.95rem; }
+
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 24px; }
+        
+        .card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);
+                border-radius: 16px; overflow: hidden; transition: transform 0.2s, box-shadow 0.2s; }
+        .card:hover { transform: translateY(-4px); box-shadow: 0 12px 24px rgba(0,0,0,0.4); border-color: rgba(255,255,255,0.15); }
+        
+        .img-container { width: 100%; aspect-ratio: 4/3; background: #000; overflow: hidden; position: relative; }
+        .img-container img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s; }
+        .card:hover .img-container img { transform: scale(1.05); }
+        
+        .card-body { padding: 16px; }
+        .card-stage { font-size: 1.1rem; font-weight: 700; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+        .card-conf { font-size: 0.8rem; padding: 3px 8px; border-radius: 12px; background: rgba(255,255,255,0.1); }
+        .card-time { color: #64748b; font-size: 0.8rem; margin-bottom: 12px; }
+        
+        .prob-bar { width: 100%; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+        .prob-fill { height: 100%; border-radius: 3px; }
+        
+        .empty-state { text-align: center; padding: 60px 20px; color: #64748b; font-size: 1.1rem; grid-column: 1 / -1; }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <h1>Historical Gallery</h1>
+        <div class="nav-links">
+            <a href="/dashboard" class="nav-link">Dashboard</a>
+            <a href="/result/latest" class="nav-link">Latest Result</a>
+            <a href="/gallery" class="nav-link active">Gallery</a>
+            <a href="/stream" class="nav-link">Live Stream</a>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="header">
+            <h2>High-Resolution Captures</h2>
+            <p>Recent periodic snapshots and manually uploaded classifications.</p>
+        </div>
+        <div class="grid" id="galleryGrid">
+            <div class="empty-state">Loading history...</div>
+        </div>
+    </div>
+
+    <script>
+        async function loadGallery() {
+            try {
+                const res = await fetch('/api/gallery?limit=50');
+                const data = await res.json();
+                const grid = document.getElementById('galleryGrid');
+                
+                if (!data.predictions || data.predictions.length === 0) {
+                    grid.innerHTML = '<div class="empty-state">No historical captures found yet.</div>';
+                    return;
+                }
+                
+                grid.innerHTML = data.predictions.map(p => {
+                    const color = p.stage_color || '#94a3b8';
+                    const time = new Date(p.timestamp).toLocaleString();
+                    const conf = (p.confidence * 100).toFixed(1);
+                    return `
+                        <div class="card">
+                            <div class="img-container">
+                                <a href="/image/${p.filename}" target="_blank">
+                                    <img src="/image/${p.filename}" alt="${p.stage_name}" loading="lazy" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\'><rect width=\\'100\\' height=\\'100\\' fill=\\'%231e293b\\'/><text x=\\'50\\' y=\\'50\\' font-family=\\'Arial\\' font-size=\\'12\\' fill=\\'%2364748b\\' text-anchor=\\'middle\\' dy=\\'4\\'>Image Not Found</text></svg>'">
+                                </a>
+                            </div>
+                            <div class="card-body">
+                                <div class="card-stage" style="color: ${color}">
+                                    ${p.stage_name || 'Unknown'}
+                                    <span class="card-conf">${conf}%</span>
+                                </div>
+                                <div class="card-time">${time}</div>
+                                <div class="prob-bar"><div class="prob-fill" style="width: ${conf}%; background: ${color}"></div></div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (err) {
+                document.getElementById('galleryGrid').innerHTML = '<div class="empty-state">Failed to load gallery data.</div>';
+            }
+        }
+        
+        loadGallery();
+        setInterval(loadGallery, 30000); // refresh every 30s
+    </script>
+</body>
+</html>
+"""
+
+# ─── Dashboard HTML ─────────────────────────────────────────────────────────
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -1175,13 +1295,20 @@ DASHBOARD_HTML = """
         <header>
             <h1>Freshness Monitor</h1>
             <p class="subtitle">Multi-stage film color change detection with barcode tracking</p>
-            <div style="margin-top:14px;">
+            <div style="margin-top:14px; display: flex; gap: 12px; justify-content: center;">
                 <a href="/stream" style="display:inline-block;padding:8px 20px;border-radius:8px;
                    background:linear-gradient(135deg,rgba(96,165,250,0.15),rgba(167,139,250,0.15));
                    border:1px solid rgba(167,139,250,0.3);color:#a78bfa;
                    text-decoration:none;font-size:0.88em;font-weight:600;
                    transition:all 0.2s;" onmouseover="this.style.background='linear-gradient(135deg,rgba(96,165,250,0.25),rgba(167,139,250,0.25))'" onmouseout="this.style.background='linear-gradient(135deg,rgba(96,165,250,0.15),rgba(167,139,250,0.15))'">
                    📷 Live Stream
+                </a>
+                <a href="/gallery" style="display:inline-block;padding:8px 20px;border-radius:8px;
+                   background:linear-gradient(135deg,rgba(16,185,129,0.15),rgba(52,211,153,0.15));
+                   border:1px solid rgba(52,211,153,0.3);color:#34d399;
+                   text-decoration:none;font-size:0.88em;font-weight:600;
+                   transition:all 0.2s;" onmouseover="this.style.background='linear-gradient(135deg,rgba(16,185,129,0.25),rgba(52,211,153,0.25))'" onmouseout="this.style.background='linear-gradient(135deg,rgba(16,185,129,0.15),rgba(52,211,153,0.15))'">
+                   🖼️ History Gallery
                 </a>
             </div>
         </header>

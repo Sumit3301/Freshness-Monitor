@@ -12,7 +12,7 @@ WorkingDirectory=/home/pi/freshness-monitor
 # With venv:
 #   ExecStart=/home/pi/freshness-monitor/venv/bin/python pi_client.py --stream --fps 15
 # Without venv (system python3):
-ExecStart=/usr/bin/python3 /home/pi/freshness-monitor/pi_client.py --stream --fps 15
+ExecStart=/usr/bin/python3 /home/pi/freshness-monitor/pi_client.py --stream --fps 15 --capture-every 7200
 
 Restart=always
 RestartSec=10

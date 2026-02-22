@@ -235,30 +235,43 @@ def transfer_paramiko(filepath: str) -> bool:
         return False
 
 
-def stream_video_feed(camera_method: str, fps: int = STREAM_FPS, frame_url: str = HTTP_FRAME):
+def stream_video_feed(
+    mode: str,
+    camera_method: str,
+    fps: int = STREAM_FPS,
+    frame_url: str = HTTP_FRAME,
+    capture_every: int = 0
+):
     """
     Continuously captures frames from the Pi camera and pushes them to
     POST /frame on the server, powering the /stream live-view webpage.
-
-    Run this in a separate terminal (or thread) while the Pi also runs
-    run_continuous_capture() for periodic high-res classification.
+    
+    If capture_every > 0, it will pause the stream every N seconds,
+    capture a high-res image, transfer it via the specified mode,
+    and then resume the stream.
 
     Args:
+        mode          : transfer mode for high-res captures ('scp', 'http', 'paramiko')
         camera_method : 'picamera2' (default) or 'libcamera'
         fps           : target push rate (frames/second)
         frame_url     : server endpoint to POST frames to
+        capture_every : seconds between high-res photo captures (0 to disable)
     """
     import requests
     import io
 
     interval = 1.0 / max(1, fps)
     logger.info("=" * 50)
-    logger.info("Freshness Monitor — Live Video Stream")
+    logger.info("Freshness Monitor — Live Video Stream + Capture")
     logger.info(f"   Camera   : {camera_method}")
     logger.info(f"   Target   : {frame_url}")
     logger.info(f"   Rate     : {fps} fps  (interval={interval:.3f}s)")
+    if capture_every > 0:
+        logger.info(f"   HR Photo : Every {capture_every}s (Mode: {mode})")
     logger.info("=" * 50)
     logger.info("Tip: verify camera with  vcgencmd get_camera  on the Pi")
+
+    last_hr_capture = time.time()
 
     if camera_method == "picamera2":
         try:
@@ -279,6 +292,42 @@ def stream_video_feed(camera_method: str, fps: int = STREAM_FPS, frame_url: str 
         try:
             while True:
                 t0 = time.time()
+                
+                # Check if it's time for a high-res capture
+                if capture_every > 0 and (t0 - last_hr_capture) >= capture_every:
+                    logger.info("📸 Pausing stream for high-res capture...")
+                    # Temporarily stop the video config and switch to still config
+                    camera.stop()
+                    
+                    hr_cfg = camera.create_still_configuration(
+                        main={"size": (IMAGE_WIDTH, IMAGE_HEIGHT)}
+                    )
+                    camera.configure(hr_cfg)
+                    camera.start()
+                    
+                    # Capture high res photo
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filepath = os.path.join(CAPTURE_DIR, f"capture_{timestamp}.jpg")
+                    ensure_dirs()
+                    camera.capture_file(filepath)
+                    logger.info(f"📸 Captured high-res: {filepath}")
+                    
+                    # Upload it
+                    if mode == "scp":
+                        transfer_scp(filepath)
+                    elif mode == "paramiko":
+                        transfer_paramiko(filepath)
+                    else:
+                        transfer_http(filepath)
+                        
+                    # Re-configure back to stream settings
+                    camera.stop()
+                    camera.configure(cfg)
+                    camera.start()
+                    last_hr_capture = time.time()
+                    t0 = time.time() # Reset t0 so we don't sleep negatively
+                    logger.info("▶️ Resuming live stream.")
+
                 # Capture a numpy array in BGR order (cv2.imencode expects BGR)
                 frame = camera.capture_array()           # BGR numpy array
                 import numpy as np, cv2
@@ -304,8 +353,11 @@ def stream_video_feed(camera_method: str, fps: int = STREAM_FPS, frame_url: str 
         except KeyboardInterrupt:
             logger.info("\n🛑 Stream stopped by user")
         finally:
-            camera.stop()
-            camera.close()
+            try:
+                camera.stop()
+                camera.close()
+            except:
+                pass
 
     else:  # libcamera fallback — lower fps, uses CLI
         logger.warning("libcamera fallback: streaming will be slow (~1fps)")
@@ -469,15 +521,23 @@ if __name__ == "__main__":
         default=HTTP_FRAME,
         help=f"Server /frame endpoint URL for streaming (default: {HTTP_FRAME})",
     )
+    parser.add_argument(
+        "--capture-every",
+        type=int,
+        default=0,
+        help="In --stream mode, capture a high-res photo every N seconds (default: 0 = disabled)",
+    )
     args = parser.parse_args()
 
     CAPTURE_INTERVAL = args.interval
 
     if args.stream:
         stream_video_feed(
+            mode=args.mode,
             camera_method=args.camera,
             fps=args.fps,
             frame_url=args.stream_url,
+            capture_every=args.capture_every
         )
     elif args.test:
         test_connection(args.mode)
