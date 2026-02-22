@@ -5,14 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/freshness-monitor
+User=sumit
+WorkingDirectory=/home/sumit/Desktop
 
 # ── Adjust the python path / venv if you use one ──────────────────────
 # With venv:
-#   ExecStart=/home/pi/freshness-monitor/venv/bin/python pi_client.py --stream --fps 15
+#   ExecStart=/home/sumit/Desktop/venv/bin/python pi_client.py --stream --fps 15
 # Without venv (system python3):
-ExecStart=/usr/bin/python3 /home/pi/freshness-monitor/pi_client.py --stream --fps 15 --capture-every 7200
+ExecStart=/usr/bin/python3 /home/sumit/Desktop/pi_client.py --stream --fps 15 --capture-every 7200
 
 Restart=always
 RestartSec=10
