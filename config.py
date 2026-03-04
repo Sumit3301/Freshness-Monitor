@@ -114,3 +114,24 @@ IMG_RESIZE = (256, 256)          # resize images before feature extraction
 HSV_BINS = (8, 8, 8)            # histogram bins for H, S, V channels
 RGB_BINS = (8, 8, 8)            # histogram bins for R, G, B channels
 N_DOMINANT_COLORS = 3           # k-means clusters for dominant color extraction
+
+# ─── Telegram Notification Settings ─────────────────────────────────
+# Telegram Bot Configuration
+# Get these values from BotFather (see setup_telegram.md for instructions)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", None)  # Your bot token from BotFather
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", None)      # Your chat ID (can be user or group)
+
+# Notification Preferences
+TELEGRAM_ENABLED = True                          # Enable/disable Telegram notifications globally
+TELEGRAM_ALERT_ON_STAGES = [2, 3]               # Send alerts for these stages (Early Spoilage, Spoiled)
+TELEGRAM_PHOTO_MIN_STAGE = 2                    # Minimum stage to send photos (saves bandwidth)
+TELEGRAM_SEND_PHOTO = True                      # Include photo in notifications
+TELEGRAM_DAILY_SUMMARY_ENABLED = True           # Send daily summary reports
+TELEGRAM_DAILY_SUMMARY_TIME = "18:00"           # Time for daily summary (HH:MM format)
+TELEGRAM_HEALTH_CHECK_INTERVAL = 3600           # Health check interval in seconds (3600 = 1 hour)
+TELEGRAM_NOTIFY_ON_STARTUP = True               # Send notification when server starts
+
+# Advanced Settings
+TELEGRAM_MAX_RETRIES = 3                        # Maximum retry attempts for failed notifications
+TELEGRAM_RETRY_DELAY = 2                        # Initial retry delay in seconds (exponential backoff)
+TELEGRAM_RATE_LIMIT_BUFFER = 1                  # Buffer time between messages in seconds
