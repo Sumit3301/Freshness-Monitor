@@ -95,6 +95,7 @@ STAGE_COLORS = {
 }
 
 BARCODE_DIR = os.path.join(BASE_DIR, "barcodes")
+DB_PATH = os.path.join(BASE_DIR, "freshness.db")
 
 # ─── Server Settings ────────────────────────────────────────────────
 SERVER_HOST = "0.0.0.0"

@@ -41,6 +41,7 @@ from PIL import Image as PILImage
 from flask import Flask, request, jsonify, render_template_string, send_file
 
 import config
+import database
 from prepare_data import extract_features
 
 # ─── Flask App ──────────────────────────────────────────────────────
@@ -188,6 +189,10 @@ def watch_incoming_folder():
                         "image_base64": image_b64
                     }
 
+                    # Persist to database
+                    with open(filepath, "rb") as db_img_f:
+                        database.save_prediction(result, db_img_f.read())
+
                     # Generate & Save QR png for latest
                     qr_bytes = generate_qr_code(latest_url, result.get("stage_color", "#333333"))
                     barcode_dir = config.BARCODE_DIR
@@ -304,6 +309,9 @@ def barcode():
         **result,
         "image_base64": image_b64
     }
+
+    # Persist to database
+    database.save_prediction(result, base64.b64decode(image_b64))
 
     return jsonify(result)
 
@@ -1041,23 +1049,24 @@ def serve_image(filename):
 
 @app.route("/api/gallery", methods=["GET"])
 def api_gallery():
-    """Return JSON list of up to to 50 recent classification results from disk."""
+    """Return JSON list of recent classification results from the database."""
     limit = request.args.get("limit", 50, type=int)
-    results = []
-    
     try:
-        # Get all json files in results dir, sorted by modified time (newest first)
-        files = [f for f in os.listdir(config.RESULTS_DIR) if f.endswith(".json")]
-        files.sort(key=lambda x: os.path.getmtime(os.path.join(config.RESULTS_DIR, x)), reverse=True)
-        
-        for filename in files[:limit]:
-            with open(os.path.join(config.RESULTS_DIR, filename), "r") as f:
-                data = json.load(f)
-                results.append(data)
+        results = database.get_predictions(limit)
     except Exception as e:
-        print(f"Error loading gallery API: {e}")
-        
+        print(f"Error loading gallery from DB: {e}")
+        results = []
     return jsonify({"predictions": results})
+
+
+@app.route("/api/gallery/image/<int:prediction_id>", methods=["GET"])
+def api_gallery_image(prediction_id):
+    """Serve a captured image from the database by prediction ID."""
+    result = database.get_image(prediction_id)
+    if result is None:
+        return jsonify({"error": "Image not found"}), 404
+    image_bytes, mimetype = result
+    return send_file(io.BytesIO(image_bytes), mimetype=mimetype)
 
 
 # ─── Gallery HTML (History page) ──────────────────────────────────────────────
@@ -1152,8 +1161,8 @@ GALLERY_HTML = """
                     return `
                         <div class="card">
                             <div class="img-container">
-                                <a href="/image/${p.filename}" target="_blank">
-                                    <img src="/image/${p.filename}" alt="${p.stage_name}" loading="lazy" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\'><rect width=\\'100\\' height=\\'100\\' fill=\\'%231e293b\\'/><text x=\\'50\\' y=\\'50\\' font-family=\\'Arial\\' font-size=\\'12\\' fill=\\'%2364748b\\' text-anchor=\\'middle\\' dy=\\'4\\'>Image Not Found</text></svg>'">
+                                <a href="/api/gallery/image/${p.id}" target="_blank">
+                                    <img src="/api/gallery/image/${p.id}" alt="${p.stage_name}" loading="lazy" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\'><rect width=\\'100\\' height=\\'100\\' fill=\\'%231e293b\\'/><text x=\\'50\\' y=\\'50\\' font-family=\\'Arial\\' font-size=\\'12\\' fill=\\'%2364748b\\' text-anchor=\\'middle\\' dy=\\'4\\'>Image Not Found</text></svg>'">
                                 </a>
                             </div>
                             <div class="card-body">
@@ -1592,6 +1601,7 @@ load_model()
 os.makedirs(config.INCOMING_DIR, exist_ok=True)
 os.makedirs(config.RESULTS_DIR, exist_ok=True)
 os.makedirs(config.BARCODE_DIR, exist_ok=True)
+database.init_db()
 server_start_time = datetime.now()
 
 

@@ -6,6 +6,7 @@ results/
 barcodes/
 features.csv
 ppr1shrimp.zip
+freshness.db
 
 # Python
 __pycache__/

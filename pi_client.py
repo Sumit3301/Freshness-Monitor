@@ -46,7 +46,7 @@ SCP_DEST_DIR   = r"d:\\POC project\\incoming"  # Destination on your PC
 CAPTURE_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "captures")
 CAPTURE_INTERVAL = 10                 # Seconds between captures
 IMAGE_WIDTH    = 1920
-IMAGE_HEIGHT   = 1080
+IMAGE_HEIGHT   = 1440                 # 4:3 ratio matches stream (640x480)
 
 # ─── Video Stream Settings ──────────────────────────────────────────
 STREAM_WIDTH   = 640    # lower resolution for smooth streaming
