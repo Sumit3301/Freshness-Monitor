@@ -50,7 +50,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 # Using flash model as it's fast and highly cost effective
-generative_model = genai.GenerativeModel('gemini-1.5-flash') if GEMINI_API_KEY else None
+generative_model = genai.GenerativeModel('gemini-1.5-flash-latest') if GEMINI_API_KEY else None
 
 # ─── Flask App ──────────────────────────────────────────────────────
 app = Flask(__name__)
