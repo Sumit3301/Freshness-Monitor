@@ -39,7 +39,6 @@ import joblib
 import qrcode
 from PIL import Image as PILImage
 from flask import Flask, request, jsonify, render_template_string, send_file
-import google.generativeai as genai
 
 import config
 import database
