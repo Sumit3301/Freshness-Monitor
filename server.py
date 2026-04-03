@@ -39,10 +39,18 @@ import joblib
 import qrcode
 from PIL import Image as PILImage
 from flask import Flask, request, jsonify, render_template_string, send_file
+import google.generativeai as genai
 
 import config
 import database
 from prepare_data import extract_features
+
+# ─── Gen AI Setup ───────────────────────────────────────────────────
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+# Using flash model as it's fast and highly cost effective
+generative_model = genai.GenerativeModel('gemini-1.5-flash') if GEMINI_API_KEY else None
 
 # ─── Flask App ──────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -72,6 +80,32 @@ def load_model():
     print(f"Model loaded: {config.MODEL_PATH}")
 
 
+def generate_ai_report(stage_name: str, confidence: float, hex_colors: dict) -> str:
+    """Uses Gemini to generate a short natural language assessment of the freshness state."""
+    if not generative_model:
+        return "AI reporting is unavailable. Please set GEMINI_API_KEY."
+    
+    # Extract just the color values from the dict to keep prompt small
+    colors_list = list(hex_colors.values())
+    
+    prompt = f"""
+    You are an AI food safety analyst. A reactive film sensor has just classified a food sample.
+    - Classification: {stage_name}
+    - Confidence: {confidence:.1%}
+    - Dominant film colors detected: {', '.join(colors_list)}
+    
+    Write a concise, 2-to-3 sentence report for the end user. Explain what this stage means,
+    mention the colors, and give a brief recommendation for storage or consumption. Keep it professional, short, and friendly.
+    """
+    
+    try:
+        response = generative_model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini API error: {e}")
+        return "AI temporarily unavailable due to a service error."
+
+
 def classify_image(image_path: str) -> dict:
     """Classify a single image and return the result with stage info."""
     try:
@@ -90,6 +124,13 @@ def classify_image(image_path: str) -> dict:
         for i, prob in enumerate(probabilities):
             stage_probs[config.LABEL_NAMES[i]] = float(prob)
 
+        # Call Gen AI for a human-readable assessment
+        ai_report = generate_ai_report(
+            stage_name=config.LABEL_NAMES[prediction],
+            confidence=float(max(probabilities)),
+            hex_colors=hex_values
+        )
+
         result = {
             "stage": int(prediction),
             "stage_name": config.LABEL_NAMES[prediction],
@@ -97,6 +138,7 @@ def classify_image(image_path: str) -> dict:
             "confidence": float(max(probabilities)),
             "stage_probabilities": stage_probs,
             "hex_colors": hex_values,
+            "ai_report": ai_report,
             "filename": os.path.basename(image_path),
             "timestamp": datetime.now().isoformat(),
         }
@@ -596,6 +638,12 @@ RESULT_HTML = r"""
             <div id="probs"></div>
         </div>
 
+        <!-- AI Assessment -->
+        <div class="card full-span" id="aiCard" style="display:none;">
+            <div class="card-title">🤖 AI Assessment</div>
+            <div id="aiReport" style="line-height: 1.5; font-size: 0.95rem; color: #d1d5db;"></div>
+        </div>
+
         <!-- Dominant colors -->
         <div class="card">
             <div class="card-title">Dominant Film Colors</div>
@@ -649,6 +697,12 @@ Object.entries(D.stage_probabilities).forEach(([name, prob], i) => {
     probsEl.appendChild(row);
     setTimeout(() => row.querySelector('.prob-fill').style.width = p + '%', 150 + i * 120);
 });
+
+// AI Report
+if (D.ai_report && D.ai_report !== "") {
+    document.getElementById('aiCard').style.display = 'block';
+    document.getElementById('aiReport').innerText = D.ai_report;
+}
 
 // Colors
 const colorsEl = document.getElementById('colors');
@@ -1016,11 +1070,12 @@ def status():
 
 @app.route("/history", methods=["GET"])
 def history():
-    """Recent predictions with stage info."""
+    """Recent predictions with stage info (from database)."""
     limit = request.args.get("limit", 20, type=int)
+    results = database.get_predictions(limit)
     return jsonify({
-        "predictions": list(prediction_history)[:limit],
-        "total": len(prediction_history),
+        "predictions": results,
+        "total": len(results),
     })
 
 

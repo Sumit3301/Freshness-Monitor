@@ -66,13 +66,23 @@ def compute_dominant_colors(image: np.ndarray, n_colors: int = 3) -> list:
     """Extract dominant colors using k-means clustering."""
     pixels = image.reshape(-1, 3).astype(np.float32)
 
+    # Filter out very dark (shadows) and very bright (glare) pixels
+    # This prevents the AI from thinking a black shadow is a "dominant color"
+    sums = pixels.sum(axis=1)
+    mask = (sums > 30) & (sums < 720)
+    filtered_pixels = pixels[mask]
+    
+    # Fallback just in case the entire image was dark
+    if len(filtered_pixels) < 100:
+        filtered_pixels = pixels
+
     # Subsample for speed
-    if len(pixels) > 5000:
-        indices = np.random.choice(len(pixels), 5000, replace=False)
-        pixels = pixels[indices]
+    if len(filtered_pixels) > 5000:
+        indices = np.random.choice(len(filtered_pixels), 5000, replace=False)
+        filtered_pixels = filtered_pixels[indices]
 
     kmeans = KMeans(n_clusters=n_colors, n_init=10, random_state=42)
-    kmeans.fit(pixels)
+    kmeans.fit(filtered_pixels)
 
     colors = kmeans.cluster_centers_.astype(int)
     # Convert BGR to hex
@@ -88,14 +98,22 @@ def extract_features(image_path: str) -> dict:
     """
     Extract color features from a single film image.
     Returns a dictionary of feature name → value.
-    Only uses whole-image features (item-agnostic).
     """
     image = cv2.imread(image_path)
     if image is None:
         raise ValueError(f"Cannot read image: {image_path}")
 
+    # Crop the central 40% of the image to isolate the reactive film
+    # and strictly ignore background, table, or plate colors.
+    h, w = image.shape[:2]
+    cy, cx = h // 2, w // 2
+    crop_h, crop_w = int(h * 0.4), int(w * 0.4)
+    y1, y2 = cy - crop_h // 2, cy + crop_h // 2
+    x1, x2 = cx - crop_w // 2, cx + crop_w // 2
+    cropped = image[y1:y2, x1:x2]
+
     # Resize for consistency
-    image_resized = cv2.resize(image, config.IMG_RESIZE)
+    image_resized = cv2.resize(cropped, config.IMG_RESIZE)
 
     features = {}
 

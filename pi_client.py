@@ -280,38 +280,34 @@ def stream_video_feed(
             logger.error("picamera2 not installed. Run: sudo apt install python3-picamera2")
             sys.exit(1)
 
+        import numpy as np, cv2
+
         camera = Picamera2()
+        # Single config at FULL resolution ensures identical sensor mode
+        # and field of view for both streaming and high-res captures.
+        # Frames are resized in software for the stream output.
         cfg = camera.create_video_configuration(
-            main={"size": (STREAM_WIDTH, STREAM_HEIGHT), "format": "BGR888"}
+            main={"size": (IMAGE_WIDTH, IMAGE_HEIGHT), "format": "BGR888"}
         )
         camera.configure(cfg)
         camera.start()
         time.sleep(1)   # let auto-exposure settle
         logger.info("📷 Pi Camera started — streaming…")
+        logger.info(f"   Sensor: {IMAGE_WIDTH}x{IMAGE_HEIGHT} → stream downscaled to {STREAM_WIDTH}x{STREAM_HEIGHT}")
 
         try:
             while True:
                 t0 = time.time()
-                
+
                 # Check if it's time for a high-res capture
+                # No reconfiguration needed — camera is already at full res!
                 if capture_every > 0 and (t0 - last_hr_capture) >= capture_every:
-                    logger.info("📸 Pausing stream for high-res capture...")
-                    # Temporarily stop the video config and switch to still config
-                    camera.stop()
-                    
-                    hr_cfg = camera.create_still_configuration(
-                        main={"size": (IMAGE_WIDTH, IMAGE_HEIGHT)}
-                    )
-                    camera.configure(hr_cfg)
-                    camera.start()
-                    
-                    # Capture high res photo
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filepath = os.path.join(CAPTURE_DIR, f"capture_{timestamp}.jpg")
                     ensure_dirs()
                     camera.capture_file(filepath)
                     logger.info(f"📸 Captured high-res: {filepath}")
-                    
+
                     # Upload it
                     if mode == "scp":
                         transfer_scp(filepath)
@@ -319,22 +315,18 @@ def stream_video_feed(
                         transfer_paramiko(filepath)
                     else:
                         transfer_http(filepath)
-                        
-                    # Re-configure back to stream settings
-                    camera.stop()
-                    camera.configure(cfg)
-                    camera.start()
-                    last_hr_capture = time.time()
-                    t0 = time.time() # Reset t0 so we don't sleep negatively
-                    logger.info("▶️ Resuming live stream.")
 
-                # picamera2 returns an RGB array by default.
-                # cv2.imencode expects a BGR array, so we must swap channels to avoid blue/orange shift.
-                import numpy as np, cv2
+                    last_hr_capture = time.time()
+                    t0 = time.time()
+
+                # Capture full-res frame then resize for stream
+                # picamera2 returns an RGB-ordered array even with BGR888 format,
+                # so we swap channels for cv2 which expects BGR.
                 frame_rgb = camera.capture_array()
                 frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                frame_stream = cv2.resize(frame_bgr, (STREAM_WIDTH, STREAM_HEIGHT))
 
-                ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                ok, buf = cv2.imencode(".jpg", frame_stream, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if not ok:
                     continue
                 jpeg_bytes = buf.tobytes()
