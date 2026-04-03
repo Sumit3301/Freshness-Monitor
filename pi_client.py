@@ -336,7 +336,7 @@ def stream_video_feed(
                         frame_url,
                         data=jpeg_bytes,
                         headers={"Content-Type": "image/jpeg"},
-                        timeout=2,
+                        timeout=5,
                     )
                 except Exception as e:
                     logger.warning(f"Frame push failed: {e}")

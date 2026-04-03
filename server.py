@@ -46,11 +46,13 @@ import database
 from prepare_data import extract_features
 
 # ─── Gen AI Setup ───────────────────────────────────────────────────
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-# Using flash model as it's fast and highly cost effective
-generative_model = genai.GenerativeModel('gemini-1.5-flash-latest') if GEMINI_API_KEY else None
+try:
+    from google import genai
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+    ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+except ImportError:
+    ai_client = None
+    print("Warning: google-genai package not installed.")
 
 # ─── Flask App ──────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -82,7 +84,7 @@ def load_model():
 
 def generate_ai_report(stage_name: str, confidence: float, hex_colors: dict) -> str:
     """Uses Gemini to generate a short natural language assessment of the freshness state."""
-    if not generative_model:
+    if not ai_client:
         return "AI reporting is unavailable. Please set GEMINI_API_KEY."
     
     # Extract just the color values from the dict to keep prompt small
@@ -99,7 +101,10 @@ def generate_ai_report(stage_name: str, confidence: float, hex_colors: dict) -> 
     """
     
     try:
-        response = generative_model.generate_content(prompt)
+        response = ai_client.models.generate_content(
+            model='gemini-2.0-flash',
+            contents=prompt
+        )
         return response.text.strip()
     except Exception as e:
         print(f"Gemini API error: {e}")
