@@ -38,7 +38,8 @@ def load_features(csv_path: str):
     with open(csv_path, "r") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            label = int(row.pop("label"))
+            raw_label = int(row.pop("label"))
+            label = min(raw_label, 2)  # Clamp to 3 stages (0: Fresh, 1: Spoiling, 2: Spoiled)
             source = row.pop("source", "")
             # Convert remaining numeric features
             feat = []
@@ -103,37 +104,40 @@ def train_and_evaluate(specific_runs=None):
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # ─── Train RandomForest ─────────────────────────────────────
-    print("\n🌳 Training RandomForest Classifier...")
-    rf = RandomForestClassifier(
-        n_estimators=100,
-        max_depth=5,
-        random_state=42,
-        class_weight="balanced",
+    # ─── Classifiers ────────────────────────────────────────────
+    from sklearn.ensemble import ExtraTreesClassifier, VotingClassifier
+    rf = RandomForestClassifier(n_estimators=200, max_depth=8, random_state=42, class_weight="balanced")
+    et = ExtraTreesClassifier(n_estimators=200, max_depth=8, random_state=42, class_weight="balanced")
+    svm = SVC(kernel="rbf", C=10.0, probability=True, class_weight="balanced", random_state=42)
+    voting_ensemble = VotingClassifier(
+        estimators=[("rf", rf), ("et", et), ("svm", svm)],
+        voting="soft"
     )
 
-    # 5-Fold Stratified Cross-Validation (robust for datasets > 100 samples)
+    models = {
+        "RandomForest": rf,
+        "ExtraTrees": et,
+        "SVM": svm,
+        "Voting Ensemble": voting_ensemble,
+    }
+
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    rf_scores = cross_val_score(rf, X_scaled, y, cv=cv, scoring="accuracy", n_jobs=-1)
-    print(f"   5-Fold CV Accuracy: {rf_scores.mean():.2%} (±{rf_scores.std():.2%})")
+    best_model = None
+    best_name = ""
+    best_score = -1.0
 
-    # ─── Train SVM ──────────────────────────────────────────────
-    print("\n🔷 Training SVM Classifier...")
-    svm = SVC(kernel="rbf", probability=True, class_weight="balanced", random_state=42)
-    svm_scores = cross_val_score(svm, X_scaled, y, cv=cv, scoring="accuracy", n_jobs=-1)
-    print(f"   5-Fold CV Accuracy: {svm_scores.mean():.2%} (±{svm_scores.std():.2%})")
+    print("\n🔍 Evaluating Classifiers with 5-Fold Cross-Validation:")
+    for name, clf in models.items():
+        scores = cross_val_score(clf, X_scaled, y, cv=cv, scoring="accuracy")
+        mean_acc = scores.mean()
+        std_acc = scores.std()
+        print(f"   {name:18s}: {mean_acc:.2%} (±{std_acc:.2%})")
+        if mean_acc > best_score:
+            best_score = mean_acc
+            best_name = name
+            best_model = clf
 
-    # ─── Select best model ──────────────────────────────────────
-    if rf_scores.mean() >= svm_scores.mean():
-        best_model = rf
-        best_name = "RandomForest"
-        best_score = rf_scores.mean()
-    else:
-        best_model = svm
-        best_name = "SVM"
-        best_score = svm_scores.mean()
-
-    print(f"\n🏆 Best model: {best_name} ({best_score:.2%})")
+    print(f"\n🏆 Best model selected: {best_name} ({best_score:.2%})")
 
     # ─── Final training on full dataset ─────────────────────────
     best_model.fit(X_scaled, y)
