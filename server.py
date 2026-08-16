@@ -42,6 +42,7 @@ from flask import Flask, request, jsonify, render_template_string, send_file
 
 import config
 import database
+from alert_service import alert_service
 from prepare_data import extract_features
 
 # ─── Gen AI Setup ───────────────────────────────────────────────────
@@ -148,6 +149,17 @@ def classify_image(image_path: str) -> dict:
         }
 
         prediction_history.appendleft(result)
+
+        # ── Trigger email alert on stage transition ──
+        try:
+            alert_action = alert_service.check_and_alert(result)
+            if alert_action == "sent":
+                print(f"   📧 Alert triggered: {result['stage_name']}")
+            elif alert_action == "skipped_same_stage":
+                print(f"   📧 Alert skipped (same stage): {result['stage_name']}")
+        except Exception as alert_err:
+            print(f"   ⚠ Alert error: {alert_err}")
+
         return result
 
     except Exception as e:
@@ -201,6 +213,7 @@ def watch_incoming_folder():
                     continue
 
                 print(f"\nNew image detected: {filename}")
+                alert_service.record_heartbeat()   # Pi delivered an image
                 result = classify_image(filepath)
 
                 if "error" not in result:
@@ -668,7 +681,7 @@ RESULT_HTML = r"""
 </div>
 
 <script>
-const STAGE_COLORS = ['#2ecc71', '#f1c40f', '#e67e22', '#e74c3c'];
+const STAGE_COLORS = ['#2ecc71', '#f1c40f', '#e74c3c'];
 const D = {{DATA_JSON}};
 
 // Image
@@ -751,6 +764,7 @@ def receive_frame():
         return jsonify({"error": "No frame data"}), 400
     with frame_lock:
         latest_frame = raw
+    alert_service.record_heartbeat()   # Pi is alive
     return jsonify({"ok": True}), 200
 
 
@@ -981,7 +995,7 @@ VIDEO_STREAM_HTML = """
     </div>
 </div>
 <script>
-const COLORS = ['#2ecc71','#f1c40f','#e67e22','#e74c3c'];
+const COLORS = ['#2ecc71','#f1c40f','#e74c3c'];
 const imgEl  = document.getElementById('streamImg');
 
 // JS-Polling stream: each request is a plain GET, works through any proxy.
@@ -1069,6 +1083,7 @@ def status():
         "result_page_url": f"{base_url}/result/latest" if latest else None,
         "stages": config.LABEL_NAMES,
         "stage_colors": config.STAGE_COLORS,
+        **alert_service.pi_status(),
     })
 
 
@@ -1093,6 +1108,43 @@ def dashboard():
 def gallery_page():
     """Historical image gallery UI."""
     return render_template_string(GALLERY_HTML)
+
+
+# ─── Alert API Endpoints ────────────────────────────────────────────
+
+@app.route("/api/alerts", methods=["GET"])
+def api_alerts():
+    """Return recent email alert history."""
+    limit = request.args.get("limit", 20, type=int)
+    try:
+        alerts = database.get_recent_alerts(limit)
+    except Exception as e:
+        print(f"Error loading alerts: {e}")
+        alerts = []
+    return jsonify({
+        "alerts": alerts,
+        "total": len(alerts),
+        "config": {
+            "enabled": config.ALERT_ENABLED,
+            "sender": config.ALERT_EMAIL_SENDER or "(not set)",
+            "recipients": config.ALERT_EMAIL_RECIPIENTS or [],
+            "smtp_host": config.ALERT_SMTP_HOST,
+        },
+    })
+
+
+@app.route("/api/alerts/test", methods=["POST"])
+def api_alerts_test():
+    """Send a test email to verify SMTP configuration."""
+    result = alert_service.send_test_email()
+    status_code = 200 if result.get("success") else 400
+    return jsonify(result), status_code
+
+
+@app.route("/api/pi-status", methods=["GET"])
+def api_pi_status():
+    """Return Raspberry Pi connectivity status."""
+    return jsonify(alert_service.pi_status())
 
 
 @app.route("/image/<filename>", methods=["GET"])
@@ -1296,8 +1348,7 @@ DASHBOARD_HTML = """
         .stage-segment.active { opacity: 1; transform: scaleY(1.1); }
         .stage-segment.s0 { background: #2ecc71; color: #fff; }
         .stage-segment.s1 { background: #f1c40f; color: #333; }
-        .stage-segment.s2 { background: #e67e22; color: #fff; }
-        .stage-segment.s3 { background: #e74c3c; color: #fff; }
+        .stage-segment.s2 { background: #e74c3c; color: #fff; }
 
         .status-bar { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
         .status-card {
@@ -1420,10 +1471,9 @@ DASHBOARD_HTML = """
         </header>
 
         <div class="stage-bar" id="stageBar">
-            <div class="stage-segment s0" id="seg0">STAGE 1<br>Very Fresh</div>
-            <div class="stage-segment s1" id="seg1">STAGE 2<br>Fresh</div>
-            <div class="stage-segment s2" id="seg2">STAGE 3<br>Early Spoilage</div>
-            <div class="stage-segment s3" id="seg3">STAGE 4<br>Spoiled</div>
+            <div class="stage-segment s0" id="seg0">STAGE 1<br>Fresh</div>
+            <div class="stage-segment s1" id="seg1">STAGE 2<br>Spoiling</div>
+            <div class="stage-segment s2" id="seg2">STAGE 3<br>Spoiled</div>
         </div>
 
         <div class="status-bar">
@@ -1475,13 +1525,39 @@ DASHBOARD_HTML = """
             <h2>Recent Classifications</h2>
             <div id="historyList"></div>
         </div>
+
+        <!-- Email Alerts Section -->
+        <div class="history-section" style="margin-top:32px;">
+            <h2 style="color:#f472b6;">📧 Email Alerts</h2>
+            <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
+                <div class="status-card" style="flex:1;min-width:180px;">
+                    <div class="label">Alert Status</div>
+                    <div class="value" id="alertStatus" style="font-size:1em;">—</div>
+                </div>
+                <div class="status-card" style="flex:1;min-width:180px;">
+                    <div class="label">Recipients</div>
+                    <div class="value" id="alertRecipients" style="font-size:0.85em;word-break:break-all;">—</div>
+                </div>
+                <div class="status-card" style="flex:0;min-width:140px;text-align:center;">
+                    <div class="label">Verify Setup</div>
+                    <button id="testAlertBtn" onclick="sendTestAlert()" style="
+                        margin-top:6px;padding:8px 18px;border-radius:8px;border:1px solid rgba(244,114,182,0.4);
+                        background:linear-gradient(135deg,rgba(244,114,182,0.1),rgba(244,114,182,0.05));
+                        color:#f472b6;cursor:pointer;font-weight:600;font-size:0.85em;
+                        transition:all 0.2s;">Send Test Email</button>
+                </div>
+            </div>
+            <div id="testAlertMsg" style="display:none;padding:10px 16px;border-radius:8px;margin-bottom:12px;
+                font-size:0.85em;animation:fadeIn 0.3s ease;"></div>
+            <div id="alertList"></div>
+        </div>
     </div>
 
     <script>
-        const stageColors = {'Stage 1 - Very Fresh':'#2ecc71', 'Stage 2 - Fresh':'#f1c40f',
-                             'Stage 3 - Early Spoilage':'#e67e22', 'Stage 4 - Spoiled':'#e74c3c'};
-        const stageShort = {'Stage 1 - Very Fresh':'S1', 'Stage 2 - Fresh':'S2',
-                            'Stage 3 - Early Spoilage':'S3', 'Stage 4 - Spoiled':'S4'};
+        const stageColors = {'Stage 1 - Fresh':'#2ecc71', 'Stage 2 - Spoiling':'#f1c40f',
+                             'Stage 3 - Spoiled':'#e74c3c'};
+        const stageShort = {'Stage 1 - Fresh':'S1', 'Stage 2 - Spoiling':'S2',
+                            'Stage 3 - Spoiled':'S3'};
 
         const fileInput = document.getElementById('fileInput');
         const uploadSection = document.getElementById('uploadSection');
@@ -1608,9 +1684,88 @@ DASHBOARD_HTML = """
             } catch (err) { /* ignore */ }
         }
 
-        setInterval(() => { refreshStatus(); refreshHistory(); }, 5000);
+        // ── Alert functions ──
+        async function refreshAlerts() {
+            try {
+                const res = await fetch('/api/alerts?limit=10');
+                const data = await res.json();
+                // Config status
+                const cfg = data.config || {};
+                const statusEl = document.getElementById('alertStatus');
+                if (cfg.enabled && cfg.sender && cfg.sender !== '(not set)') {
+                    statusEl.textContent = '✅ Active';
+                    statusEl.style.color = '#34d399';
+                } else if (!cfg.enabled) {
+                    statusEl.textContent = '⏸ Disabled';
+                    statusEl.style.color = '#94a3b8';
+                } else {
+                    statusEl.textContent = '⚠ Not Configured';
+                    statusEl.style.color = '#fbbf24';
+                }
+                const recipEl = document.getElementById('alertRecipients');
+                recipEl.textContent = (cfg.recipients && cfg.recipients.length)
+                    ? cfg.recipients.join(', ') : '(none set)';
+
+                // Alert history
+                const list = document.getElementById('alertList');
+                if (!data.alerts || data.alerts.length === 0) {
+                    list.innerHTML = '<div style="color:#475569;padding:12px;text-align:center;font-size:0.9em;">No alerts sent yet</div>';
+                    return;
+                }
+                const stageEmoji = {0:'🟢',1:'🟡',2:'🔴'};
+                list.innerHTML = data.alerts.map(a => {
+                    const emoji = stageEmoji[a.stage] || '📧';
+                    const statusBadge = a.status === 'sent'
+                        ? '<span style="color:#34d399;font-size:0.75em;">✓ Sent</span>'
+                        : '<span style="color:#ef4444;font-size:0.75em;">✗ Failed</span>';
+                    const c = stageColors[a.stage_name] || '#aaa';
+                    return `<div class="history-item">
+                        <span style="font-size:1.2em;">${emoji}</span>
+                        <span class="filename">${a.stage_name}</span>
+                        <span class="badge" style="background:${c}22;color:${c};border:1px solid ${c}44;font-size:0.7em;">${a.recipient}</span>
+                        ${statusBadge}
+                        <span class="time">${a.sent_at || ''}</span>
+                    </div>`;
+                }).join('');
+            } catch(e) {}
+        }
+
+        async function sendTestAlert() {
+            const btn = document.getElementById('testAlertBtn');
+            const msg = document.getElementById('testAlertMsg');
+            btn.disabled = true;
+            btn.textContent = 'Sending...';
+            try {
+                const res = await fetch('/api/alerts/test', { method: 'POST' });
+                const data = await res.json();
+                msg.style.display = 'block';
+                if (data.success) {
+                    msg.style.background = 'rgba(52,211,153,0.1)';
+                    msg.style.border = '1px solid rgba(52,211,153,0.3)';
+                    msg.style.color = '#34d399';
+                    msg.textContent = '✅ Test email sent to: ' + data.recipients.join(', ');
+                } else {
+                    msg.style.background = 'rgba(239,68,68,0.1)';
+                    msg.style.border = '1px solid rgba(239,68,68,0.3)';
+                    msg.style.color = '#ef4444';
+                    msg.textContent = '❌ Failed: ' + (data.error || 'Unknown error');
+                }
+            } catch(e) {
+                msg.style.display = 'block';
+                msg.style.background = 'rgba(239,68,68,0.1)';
+                msg.style.border = '1px solid rgba(239,68,68,0.3)';
+                msg.style.color = '#ef4444';
+                msg.textContent = '❌ Error: ' + e.message;
+            }
+            btn.disabled = false;
+            btn.textContent = 'Send Test Email';
+            setTimeout(() => { msg.style.display = 'none'; }, 8000);
+        }
+
+        setInterval(() => { refreshStatus(); refreshHistory(); refreshAlerts(); }, 5000);
         refreshStatus();
         refreshHistory();
+        refreshAlerts();
     </script>
 </body>
 </html>
@@ -1635,6 +1790,9 @@ def main():
 
     watcher = threading.Thread(target=watch_incoming_folder, daemon=True)
     watcher.start()
+
+    # Start Pi heartbeat watchdog
+    alert_service.start_heartbeat_watchdog()
 
     port = int(os.environ.get("PORT", config.SERVER_PORT))
 
@@ -1661,7 +1819,9 @@ os.makedirs(config.INCOMING_DIR, exist_ok=True)
 os.makedirs(config.RESULTS_DIR, exist_ok=True)
 os.makedirs(config.BARCODE_DIR, exist_ok=True)
 database.init_db()
+database.init_alerts_table()
 server_start_time = datetime.now()
+alert_service.start_heartbeat_watchdog()
 
 
 if __name__ == "__main__":

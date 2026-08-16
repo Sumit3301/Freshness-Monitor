@@ -37,10 +37,12 @@ HTTP_BARCODE   = f"{RENDER_URL}/barcode"
 HTTP_FRAME     = f"{RENDER_URL}/frame"   # live video frame endpoint
 
 # Local PC server — file storage only
-LOCAL_SERVER_IP   = "100.108.137.17"      # ← Your PC's Tailscale IP
+LOCAL_SERVER_IP   = "100.126.82.18"      # ← Your PC's Tailscale IP
 LOCAL_SERVER_PORT = 5001                  # file_server.py port
 LOCAL_UPLOAD_URL  = f"http://{LOCAL_SERVER_IP}:{LOCAL_SERVER_PORT}/upload"
 
+SERVER_IP      = LOCAL_SERVER_IP      # Alias for SSH/SCP connections
+SERVER_PORT    = LOCAL_SERVER_PORT    # Alias for SSH/SCP connections
 SERVER_USER    = "Acer"               # ← Your Windows username
 SCP_DEST_DIR   = r"d:\\POC project\\incoming"  # Destination on your PC
 CAPTURE_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "captures")
@@ -135,6 +137,18 @@ def transfer_scp(filepath: str) -> bool:
       ssh-copy-id <SERVER_USER>@<SERVER_IP>
     """
     filename = os.path.basename(filepath)
+    dest_path = os.path.join(SCP_DEST_DIR, filename).replace("\\\\", "\\")
+
+    # Check duplicate on remote Windows machine over SSH before copying
+    check_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", f"{SERVER_USER}@{SERVER_IP}", f'if exist "{dest_path}" (exit 0) else (exit 1)']
+    try:
+        check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=10)
+        if check_result.returncode == 0:
+            logger.info(f"⏭️ File already exists on server, skipping: {filename}")
+            return True
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to check duplicate status over SSH: {e}")
+
     dest = f"{SERVER_USER}@{SERVER_IP}:{SCP_DEST_DIR}\\{filename}"
 
     cmd = ["scp", "-o", "StrictHostKeyChecking=no", filepath, dest]
@@ -153,11 +167,21 @@ def transfer_http(filepath: str) -> dict:
     """
     Transfer an image via HTTP POST:
       1. Send to Render cloud for prediction + dashboard
-      2. Send to local PC for file storage
+      2. Send to local PC for file storage (skips if duplicate)
     """
     import requests
 
     filename = os.path.basename(filepath)
+
+    # ── Check duplicate on local PC first ──
+    try:
+        check_url = f"http://{LOCAL_SERVER_IP}:{LOCAL_SERVER_PORT}/check/{filename}"
+        resp_check = requests.get(check_url, timeout=5)
+        if resp_check.status_code == 200 and resp_check.json().get("exists"):
+            logger.info(f"⏭️ File already exists on local PC, skipping: {filename}")
+            return {"status": "skipped", "reason": "exists"}
+    except Exception as e:
+        logger.warning(f"  Failed to check duplicate status on local PC: {e}")
 
     # ── 1. Send to Render for prediction ──
     logger.info(f"Sending: {filename} -> {HTTP_BARCODE}")
@@ -225,6 +249,18 @@ def transfer_paramiko(filepath: str) -> bool:
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(SERVER_IP, username=SERVER_USER)
         sftp = ssh.open_sftp()
+
+        # Check duplicate
+        try:
+            sftp.stat(remote_path)
+            logger.info(f"⏭️ File already exists on local PC, skipping: {filename}")
+            sftp.close()
+            ssh.close()
+            return True
+        except IOError:
+            # File does not exist, proceed with upload
+            pass
+
         sftp.put(filepath, remote_path)
         sftp.close()
         ssh.close()
@@ -259,6 +295,19 @@ def stream_video_feed(
     """
     import requests
     import io
+    import threading
+
+    session = requests.Session()
+
+    # ── Render Warm-Up Ping ───────────────────────────────────────────
+    # If target is Render, send an initial ping to wake up the free tier service before streaming
+    if RENDER_URL in frame_url:
+        logger.info("⏳ Warming up Render cloud server before streaming...")
+        try:
+            session.get(f"{RENDER_URL}/status", timeout=15)
+            logger.info("✅ Render web service is active & ready!")
+        except Exception as e:
+            logger.warning(f"⚠️ Render warm-up ping failed (server may still be starting): {e}")
 
     interval = 1.0 / max(1, fps)
     logger.info("=" * 50)
@@ -272,6 +321,43 @@ def stream_video_feed(
     logger.info("Tip: verify camera with  vcgencmd get_camera  on the Pi")
 
     last_hr_capture = time.time()
+    last_warning_time = 0.0
+
+    # ── Async Background Frame Pusher Thread ──────────────────────────
+    # Prevents camera loop from blocking when Wi-Fi upload or server response is slow.
+    frame_lock = threading.Lock()
+    latest_frame_bytes = None
+    stop_event = threading.Event()
+
+    def _frame_pusher_worker():
+        nonlocal last_warning_time
+        while not stop_event.is_set():
+            data_to_send = None
+            with frame_lock:
+                data_to_send = latest_frame_bytes
+
+            if data_to_send is None:
+                time.sleep(0.03)
+                continue
+
+            try:
+                session.post(
+                    frame_url,
+                    data=data_to_send,
+                    headers={"Content-Type": "image/jpeg"},
+                    timeout=(3.0, 10.0),
+                )
+            except Exception as e:
+                now = time.time()
+                if now - last_warning_time > 10.0:
+                    logger.warning(f"Frame push warning (network/cloud latency): {e}")
+                    last_warning_time = now
+                time.sleep(0.1)
+            else:
+                time.sleep(0.01)
+
+    pusher_thread = threading.Thread(target=_frame_pusher_worker, daemon=True)
+    pusher_thread.start()
 
     if camera_method == "picamera2":
         try:
@@ -326,20 +412,11 @@ def stream_video_feed(
                 frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
                 frame_stream = cv2.resize(frame_bgr, (STREAM_WIDTH, STREAM_HEIGHT))
 
-                ok, buf = cv2.imencode(".jpg", frame_stream, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                if not ok:
-                    continue
-                jpeg_bytes = buf.tobytes()
-
-                try:
-                    requests.post(
-                        frame_url,
-                        data=jpeg_bytes,
-                        headers={"Content-Type": "image/jpeg"},
-                        timeout=5,
-                    )
-                except Exception as e:
-                    logger.warning(f"Frame push failed: {e}")
+                # Encode at quality=60 to optimize payload size over RPi Wi-Fi link (~20KB vs ~60KB)
+                ok, buf = cv2.imencode(".jpg", frame_stream, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                if ok:
+                    with frame_lock:
+                        latest_frame_bytes = buf.tobytes()
 
                 elapsed = time.time() - t0
                 sleep_for = max(0.0, interval - elapsed)
@@ -348,6 +425,7 @@ def stream_video_feed(
         except KeyboardInterrupt:
             logger.info("\n🛑 Stream stopped by user")
         finally:
+            stop_event.set()
             try:
                 camera.stop()
                 camera.close()
@@ -357,27 +435,21 @@ def stream_video_feed(
     else:  # libcamera fallback — lower fps, uses CLI
         logger.warning("libcamera fallback: streaming will be slow (~1fps)")
         try:
-            import requests
             while True:
                 t0 = time.time()
                 filepath = capture_image_libcamera()
                 if filepath:
                     with open(filepath, "rb") as f:
-                        jpeg_bytes = f.read()
-                    try:
-                        requests.post(
-                            frame_url,
-                            data=jpeg_bytes,
-                            headers={"Content-Type": "image/jpeg"},
-                            timeout=2,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Frame push failed: {e}")
+                        buf_bytes = f.read()
+                    with frame_lock:
+                        latest_frame_bytes = buf_bytes
                     os.remove(filepath)  # cleanup temp file
                 elapsed = time.time() - t0
                 time.sleep(max(0.0, interval - elapsed))
         except KeyboardInterrupt:
             logger.info("\n🛑 Stream stopped by user")
+        finally:
+            stop_event.set()
 
 
 def run_continuous_capture(mode: str, camera_method: str):

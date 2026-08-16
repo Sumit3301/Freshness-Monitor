@@ -23,7 +23,7 @@ import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import LeaveOneOut, cross_val_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import classification_report, accuracy_score
 
 import config
@@ -54,7 +54,7 @@ def load_features(csv_path: str):
     return np.array(features), np.array(labels), sources
 
 
-def train_and_evaluate():
+def train_and_evaluate(specific_runs=None):
     """Train the model with cross-validation and save it."""
     csv_path = os.path.join(config.BASE_DIR, "features.csv")
 
@@ -67,6 +67,34 @@ def train_and_evaluate():
     print("=" * 60)
 
     X, y, sources = load_features(csv_path)
+
+    if specific_runs:
+        print(f"⌛ Filtering dataset for runs: {specific_runs}")
+        filtered_X = []
+        filtered_y = []
+        filtered_sources = []
+        for i in range(0, len(X), 6):
+            chunk_X = X[i:i+6]
+            chunk_y = y[i:i+6]
+            chunk_src = sources[i:i+6]
+            if len(chunk_src) > 0:
+                orig_src = chunk_src[0]
+                match = False
+                for r in specific_runs:
+                    if r in orig_src:
+                        match = True
+                        break
+                if match:
+                    filtered_X.extend(chunk_X)
+                    filtered_y.extend(chunk_y)
+                    filtered_sources.extend(chunk_src)
+        X = np.array(filtered_X)
+        y = np.array(filtered_y)
+        sources = filtered_sources
+        if len(X) == 0:
+            print("❌ No samples matched the specified runs!")
+            return
+
     print(f"\n📊 Dataset: {len(X)} samples, {X.shape[1]} features")
     for stage_id, stage_name in config.LABEL_NAMES.items():
         print(f"   {stage_name}: {np.sum(y == stage_id)} samples")
@@ -84,16 +112,16 @@ def train_and_evaluate():
         class_weight="balanced",
     )
 
-    # Leave-One-Out Cross-Validation
-    loo = LeaveOneOut()
-    rf_scores = cross_val_score(rf, X_scaled, y, cv=loo, scoring="accuracy")
-    print(f"   LOO-CV Accuracy: {rf_scores.mean():.2%} (±{rf_scores.std():.2%})")
+    # 5-Fold Stratified Cross-Validation (robust for datasets > 100 samples)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    rf_scores = cross_val_score(rf, X_scaled, y, cv=cv, scoring="accuracy", n_jobs=-1)
+    print(f"   5-Fold CV Accuracy: {rf_scores.mean():.2%} (±{rf_scores.std():.2%})")
 
     # ─── Train SVM ──────────────────────────────────────────────
     print("\n🔷 Training SVM Classifier...")
     svm = SVC(kernel="rbf", probability=True, class_weight="balanced", random_state=42)
-    svm_scores = cross_val_score(svm, X_scaled, y, cv=loo, scoring="accuracy")
-    print(f"   LOO-CV Accuracy: {svm_scores.mean():.2%} (±{svm_scores.std():.2%})")
+    svm_scores = cross_val_score(svm, X_scaled, y, cv=cv, scoring="accuracy", n_jobs=-1)
+    print(f"   5-Fold CV Accuracy: {svm_scores.mean():.2%} (±{svm_scores.std():.2%})")
 
     # ─── Select best model ──────────────────────────────────────
     if rf_scores.mean() >= svm_scores.mean():
@@ -140,4 +168,13 @@ def train_and_evaluate():
 
 
 if __name__ == "__main__":
-    train_and_evaluate()
+    import argparse
+    parser = argparse.ArgumentParser(description="Train freshness classification model.")
+    parser.add_argument("--runs", type=str, help="Comma-separated list of run folders to train on")
+    args = parser.parse_args()
+    
+    specific_runs = None
+    if args.runs:
+        specific_runs = [r.strip() for r in args.runs.split(",") if r.strip()]
+        
+    train_and_evaluate(specific_runs=specific_runs)

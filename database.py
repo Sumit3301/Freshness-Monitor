@@ -119,3 +119,81 @@ def get_image(prediction_id: int) -> tuple[bytes, str] | None:
     if row and row["image_data"]:
         return row["image_data"], row["image_mimetype"]
     return None
+
+
+# ─── Alert Tracking ─────────────────────────────────────────────────
+
+def init_alerts_table():
+    """Create the alerts table if it doesn't exist."""
+    conn = _get_conn()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS alerts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            prediction_id   INTEGER,
+            stage           INTEGER,
+            stage_name      TEXT,
+            recipient       TEXT,
+            sent_at         TEXT,
+            subject         TEXT,
+            status          TEXT
+        )
+    """)
+    conn.commit()
+
+
+def save_alert(prediction_id: int, stage: int, stage_name: str,
+               recipient: str, subject: str, status: str):
+    """Insert an alert record."""
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT INTO alerts
+            (prediction_id, stage, stage_name, recipient, sent_at, subject, status)
+        VALUES (?, ?, ?, ?, datetime('now'), ?, ?)
+        """,
+        (prediction_id, stage, stage_name, recipient, subject, status),
+    )
+    conn.commit()
+
+
+def get_recent_alerts(limit: int = 20) -> list[dict]:
+    """Return recent alerts (newest first)."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT id, prediction_id, stage, stage_name, recipient,
+               sent_at, subject, status
+        FROM alerts
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    return [
+        {
+            "id": row["id"],
+            "prediction_id": row["prediction_id"],
+            "stage": row["stage"],
+            "stage_name": row["stage_name"],
+            "recipient": row["recipient"],
+            "sent_at": row["sent_at"],
+            "subject": row["subject"],
+            "status": row["status"],
+        }
+        for row in rows
+    ]
+
+
+def get_last_alerted_stage() -> int | None:
+    """Return the stage number of the most recently sent alert, or None."""
+    conn = _get_conn()
+    row = conn.execute(
+        """
+        SELECT stage FROM alerts
+        WHERE status = 'sent'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return row["stage"] if row else None

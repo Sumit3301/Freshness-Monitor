@@ -178,14 +178,24 @@ def augment_image(image: np.ndarray, n_augments: int = 5) -> list:
     return augmented
 
 
-def discover_training_images():
+def discover_training_images(specific_runs=None):
     """
     Discover training images from all configured training directories.
     Parses filenames to extract hour values and map to freshness stages.
 
     Returns list of (filepath, label, source_name) tuples.
     """
-    training_dirs = config.discover_training_dirs()
+    if specific_runs:
+        training_dirs = []
+        for r in specific_runs:
+            p = os.path.join(config.BASE_DIR, r)
+            if os.path.isdir(p):
+                training_dirs.append(p)
+            else:
+                print(f"❌ Specific run folder not found: {p}")
+    else:
+        training_dirs = config.discover_training_dirs()
+        
     images = []
 
     if not training_dirs:
@@ -218,7 +228,7 @@ def discover_training_images():
     return images
 
 
-def prepare_dataset():
+def prepare_dataset(specific_runs=None):
     """
     Main function: discover training images, extract features, save to CSV.
     Also creates augmented versions for expanding the training set.
@@ -234,7 +244,7 @@ def prepare_dataset():
     print("📊 Freshness Classification — Data Preparation")
     print("=" * 60)
 
-    training_images = discover_training_images()
+    training_images = discover_training_images(specific_runs=specific_runs)
     if not training_images:
         print("❌ No training images found!")
         return None
@@ -308,4 +318,13 @@ def prepare_dataset():
 
 
 if __name__ == "__main__":
-    prepare_dataset()
+    import argparse
+    parser = argparse.ArgumentParser(description="Prepare freshness dataset features.")
+    parser.add_argument("--runs", type=str, help="Comma-separated list of run directories to process")
+    args = parser.parse_args()
+    
+    specific_runs = None
+    if args.runs:
+        specific_runs = [r.strip() for r in args.runs.split(",") if r.strip()]
+        
+    prepare_dataset(specific_runs=specific_runs)

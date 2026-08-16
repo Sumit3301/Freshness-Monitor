@@ -163,7 +163,7 @@ POC project/
 ### Example: Classify a Film Image
 
 ```bash
-curl -X POST -F "image=@sample.jpg" http://100.108.137.17:5000/barcode
+curl -X POST -F "image=@sample.jpg" http://100.126.82.18:5000/barcode
 ```
 
 **Response:**
@@ -211,7 +211,7 @@ The system extracts film color features from each image:
 graph TB
     subgraph Internet / Any Network
         PI[Raspberry Pi 3B+<br>100.x.x.x]
-        PC[Local PC Server<br>100.108.137.17]
+        PC[Local PC Server<br>100.126.82.18]
     end
 
     subgraph Tailscale Mesh VPN

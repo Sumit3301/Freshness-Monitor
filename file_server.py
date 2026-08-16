@@ -48,6 +48,14 @@ def upload():
     })
 
 
+@app.route("/check/<filename>", methods=["GET"])
+def check_file(filename):
+    """Check if a file already exists in the storage directory."""
+    os.makedirs(STORAGE_DIR, exist_ok=True)
+    exists = os.path.exists(os.path.join(STORAGE_DIR, filename))
+    return jsonify({"exists": exists})
+
+
 @app.route("/status", methods=["GET"])
 def status():
     """Check server status and file count."""
