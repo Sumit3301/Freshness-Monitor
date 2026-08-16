@@ -1,6 +1,7 @@
 # Ignore non-code binary & document files
 *.docx
 *.pkl
+!model/*.pkl
 *.csv
 *.xml
 *.txt
