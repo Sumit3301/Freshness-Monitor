@@ -60,7 +60,7 @@ app = Flask(__name__)
 # ─── Global State ───────────────────────────────────────────────────
 model = None
 scaler = None
-prediction_history = deque(maxlen=100)
+prediction_history = deque()
 result_store = {}          # barcode_id -> {result + image_base64}
 server_start_time = None
 
